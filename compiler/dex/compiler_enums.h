@@ -537,7 +537,6 @@ enum FixupKind {
   kFixupLoad,        // Mostly for immediates.
   kFixupVLoad,       // FP load which *may* be pc-relative.
   kFixupCBxZ,        // Cbz, Cbnz.
-  kFixupPushPop,     // Not really pc relative, but changes size based on args.
   kFixupCondBranch,  // Conditional branch
   kFixupT1Branch,    // Thumb1 Unconditional branch
   kFixupT2Branch,    // Thumb2 Unconditional branch
