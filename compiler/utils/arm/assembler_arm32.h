@@ -272,6 +272,12 @@ class Arm32Assembler FINAL : public ArmAssembler {
                       int32_t offset,
                       Condition cond = AL) OVERRIDE;
 
+  bool ShifterOperandCanHold(Register rd,
+                             Register rn,
+                             Opcode opcode,
+                             uint32_t immediate,
+                             ShifterOperand* shifter_op) OVERRIDE;
+
 
   static bool IsInstructionForExceptionHandling(uword pc);
 
@@ -358,6 +364,7 @@ class Arm32Assembler FINAL : public ArmAssembler {
   static int DecodeBranchOffset(int32_t inst);
   int32_t EncodeTstOffset(int offset, int32_t inst);
   int DecodeTstOffset(int32_t inst);
+  bool ShifterOperandCanHoldArm32(uint32_t immediate, ShifterOperand* shifter_op);
 };
 
 }  // namespace arm

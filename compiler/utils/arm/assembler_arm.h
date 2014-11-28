@@ -29,6 +29,9 @@
 namespace art {
 namespace arm {
 
+class Arm32Assembler;
+class Thumb2Assembler;
+
 class ShifterOperand {
  public:
   ShifterOperand() : type_(kUnknown), rm_(kNoRegister), rs_(kNoRegister),
@@ -102,33 +105,6 @@ class ShifterOperand {
     kImmediate
   };
 
-  static bool CanHoldArm(uint32_t immediate, ShifterOperand* shifter_op) {
-    // Avoid the more expensive test for frequent small immediate values.
-    if (immediate < (1 << kImmed8Bits)) {
-      shifter_op->type_ = kImmediate;
-      shifter_op->is_rotate_ = true;
-      shifter_op->rotate_ = 0;
-      shifter_op->immed_ = immediate;
-      return true;
-    }
-    // Note that immediate must be unsigned for the test to work correctly.
-    for (int rot = 0; rot < 16; rot++) {
-      uint32_t imm8 = (immediate << 2*rot) | (immediate >> (32 - 2*rot));
-      if (imm8 < (1 << kImmed8Bits)) {
-        shifter_op->type_ = kImmediate;
-        shifter_op->is_rotate_ = true;
-        shifter_op->rotate_ = rot;
-        shifter_op->immed_ = imm8;
-        return true;
-      }
-    }
-    return false;
-  }
-
-  static bool CanHoldThumb(Register rd, Register rn, Opcode opcode,
-                           uint32_t immediate, ShifterOperand* shifter_op);
-
-
  private:
   Type type_;
   Register rm_;
@@ -138,6 +114,9 @@ class ShifterOperand {
   Shift shift_;
   uint32_t rotate_;
   uint32_t immed_;
+
+  friend class Arm32Assembler;
+  friend class Thumb2Assembler;
 
 #ifdef SOURCE_ASSEMBLER_SUPPORT
   friend class BinaryAssembler;
@@ -601,6 +580,14 @@ class ArmAssembler : public Assembler {
                    Condition cond = AL) = 0;
 
   static bool IsInstructionForExceptionHandling(uword pc);
+
+  // Returns whether the `immediate` can fit in a `ShifterOperand`. If yes,
+  // `shifter_op` contains the operand.
+  virtual bool ShifterOperandCanHold(Register rd,
+                                     Register rn,
+                                     Opcode opcode,
+                                     uint32_t immediate,
+                                     ShifterOperand* shifter_op) = 0;
 
   virtual void Bind(Label* label) = 0;
 
