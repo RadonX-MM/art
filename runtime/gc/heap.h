@@ -291,6 +291,10 @@ class Heap {
   // implement dalvik.system.VMRuntime.clearGrowthLimit.
   void ClearGrowthLimit();
 
+  // Make the current growth limit the new maximum capacity, unmaps pages at the end of spaces
+  // which will never be used. Used to implement dalvik.system.VMRuntime.clampGrowthLimit.
+  void ClampGrowthLimit();
+
   // Target ideal heap utilization ratio, implements
   // dalvik.system.VMRuntime.getTargetHeapUtilization.
   double GetTargetHeapUtilization() const {
@@ -876,7 +880,7 @@ class Heap {
   collector::GcType next_gc_type_;
 
   // Maximum size that the heap can reach.
-  const size_t capacity_;
+  size_t capacity_;
 
   // The size the heap is limited to. This is initially smaller than capacity, but for largeHeap
   // programs it is "cleared" making it the same as capacity.
