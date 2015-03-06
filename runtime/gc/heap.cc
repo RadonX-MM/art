@@ -543,6 +543,10 @@ bool Heap::MayUseCollector(CollectorType type) const {
   return foreground_collector_type_ == type || background_collector_type_ == type;
 }
 
+bool Heap::MayUseCollector(CollectorType type) const {
+  return foreground_collector_type_ == type || background_collector_type_ == type;
+}
+
 space::MallocSpace* Heap::CreateMallocSpaceFromMemMap(MemMap* mem_map, size_t initial_size,
                                                       size_t growth_limit, size_t capacity,
                                                       const char* name, bool can_move_objects) {
