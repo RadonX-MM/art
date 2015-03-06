@@ -599,6 +599,9 @@ class Heap {
     return &reference_processor_;
   }
 
+  // Whether or not we may use a garbage collector, used so that we only create collectors we need.
+  bool MayUseCollector(CollectorType type) const;
+
  private:
   // Compact source space to target space.
   void Compact(space::ContinuousMemMapAllocSpace* target_space,
