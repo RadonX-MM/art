@@ -62,6 +62,7 @@
 #define CLASS_OFFSET_FROM_CLZ(rshift) \
     MemberOffset((static_cast<int>(rshift) * CLASS_OFFSET_ALIGNMENT))
 
+#define IMT_SIZE 64
 #ifndef IMT_SIZE
 #error IMT_SIZE not defined
 #endif
