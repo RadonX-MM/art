@@ -386,6 +386,7 @@ static void RunOptimizations(HGraph* graph,
     simplify1,
     dce1,
     inliner,
+    GetMoreOptimizing(graph, dex_compilation_unit, driver, stats),
     // BooleanSimplifier depends on the InstructionSimplifier removing redundant
     // suspend checks to recognize empty blocks.
     boolean_simplify,

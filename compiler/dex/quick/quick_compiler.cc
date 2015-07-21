@@ -650,7 +650,7 @@ CompiledMethod* QuickCompiler::Compile(const DexFile::CodeItem* code_item,
   if (instruction_set == kArm) {
     instruction_set = kThumb2;
   }
-  CompilationUnit cu(runtime->GetArenaPool(), instruction_set, driver, class_linker);
+  CompilationUnit cu(runtime->GetArenaPool(), instruction_set, driver, class_linker, this);
   cu.dex_file = &dex_file;
   cu.class_def_idx = class_def_idx;
   cu.method_idx = method_idx;
@@ -733,11 +733,11 @@ CompiledMethod* QuickCompiler::Compile(const DexFile::CodeItem* code_item,
   PassDriverMEOpts pass_driver(GetPreOptPassManager(), GetPostOptPassManager(), &cu);
   pass_driver.Launch();
 
-  if (check_bail_out && cu.mir_graph->PassFailed()) {
+  if (GetCheckBailOutFlag() && cu.mir_graph->PassFailed()) {
     return nullptr;
   }
 
-  if (check_bail_out) {
+  if (GetCheckBailOutFlag()) {
     VLOG(compiler) << "fast compile applied to " << PrettyMethod(method_idx, dex_file);
   }
 
@@ -869,6 +869,7 @@ QuickCompiler::QuickCompiler(CompilerDriver* driver) : Compiler(driver, 100) {
   if (pass_manager_options->GetPrintPassOptions()) {
     PassDriverMEPostOpt::PrintPassOptions(post_opt_pass_manager_.get());
   }
+  check_bail_out_ = false;
 }
 
 QuickCompiler::~QuickCompiler() {
