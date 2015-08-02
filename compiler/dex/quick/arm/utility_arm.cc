@@ -144,7 +144,6 @@ bool ArmMir2Lir::InexpensiveConstantInt(int32_t value, Instruction::Code opcode)
       if ((value >> 12) == (value >> 31)) {  // Signed 12-bit, RRI12 versions of ADD/SUB.
         return true;
       }
-      FALLTHROUGH_INTENDED;
     case Instruction::IF_EQ:
     case Instruction::IF_NE:
     case Instruction::IF_LT:
@@ -165,7 +164,6 @@ bool ArmMir2Lir::InexpensiveConstantInt(int32_t value, Instruction::Code opcode)
       if ((value >> 16) == 0) {
         return true;  // movw, 16-bit unsigned.
       }
-      FALLTHROUGH_INTENDED;
     case Instruction::AND_INT:
     case Instruction::AND_INT_2ADDR:
     case Instruction::AND_INT_LIT16:
