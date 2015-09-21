@@ -28,10 +28,10 @@ include art/build/Android.common.mk
 #
 # Beware that tests may use the non-debug build for performance, notable 055-enum-performance
 #
-ART_BUILD_TARGET_NDEBUG ?= true
-ART_BUILD_TARGET_DEBUG ?= true
-ART_BUILD_HOST_NDEBUG ?= true
-ART_BUILD_HOST_DEBUG ?= true
+ART_BUILD_TARGET_NDEBUG := true
+ART_BUILD_TARGET_DEBUG := false
+ART_BUILD_HOST_NDEBUG := true
+ART_BUILD_HOST_DEBUG := false
 
 ifeq ($(ART_BUILD_TARGET_NDEBUG),false)
 $(info Disabling ART_BUILD_TARGET_NDEBUG)
@@ -86,7 +86,7 @@ endif
 #
 # Used to enable optimizing compiler
 #
-ART_USE_OPTIMIZING_COMPILER := false
+ART_USE_OPTIMIZING_COMPILER := true
 ifneq ($(wildcard art/USE_OPTIMIZING_COMPILER),)
 $(info Enabling ART_USE_OPTIMIZING_COMPILER because of existence of art/USE_OPTIMIZING_COMPILER)
 ART_USE_OPTIMIZING_COMPILER := true
@@ -116,10 +116,6 @@ endif
 
 # Host.
 ART_HOST_CLANG := false
-ifneq ($(WITHOUT_HOST_CLANG),true)
-  # By default, host builds use clang for better warnings.
-  ART_HOST_CLANG := true
-endif
 
 # Clang on the target. Target builds use GCC by default.
 ART_TARGET_CLANG :=
@@ -190,7 +186,9 @@ ifeq ($(ART_SEA_IR_MODE),true)
 endif
 
 art_non_debug_cflags := \
-  -O3
+  -O3 \
+  -flto \
+  -DNDEBUG
 
 art_host_non_debug_cflags := \
   $(art_non_debug_cflags)
@@ -198,20 +196,13 @@ art_host_non_debug_cflags := \
 art_target_non_debug_cflags := \
   $(art_non_debug_cflags)
 
-ifeq ($(HOST_OS),linux)
-  # Larger frame-size for host clang builds today
-  art_host_non_debug_cflags += -Wframe-larger-than=3000
-  art_target_non_debug_cflags += -Wframe-larger-than=1728
-endif
-
 # FIXME: upstream LLVM has a vectorizer bug that needs to be fixed
 ART_TARGET_CLANG_CFLAGS_arm64 += \
   -fno-vectorize
 
+# Force non-debug
 art_debug_cflags := \
-  -O1 \
-  -DDYNAMIC_ANNOTATIONS_ENABLED=1 \
-  -UNDEBUG
+  $(art_non_debug_cflags)
 
 ifndef LIBART_IMG_HOST_BASE_ADDRESS
   $(error LIBART_IMG_HOST_BASE_ADDRESS unset)
@@ -287,8 +278,11 @@ ART_HOST_CFLAGS += -Wthread-safety
 # ART_TARGET_CFLAGS += -fno-omit-frame-pointer -marm -mapcs
 
 # Addition CPU specific CFLAGS.
+CORTEX_A15_TYPE := \
+	cortex-a15 \
+	krait 
 ifeq ($(TARGET_ARCH),arm)
-  ifneq ($(filter cortex-a15, $(TARGET_CPU_VARIANT)),)
+  ifneq ($(filter $(CORTEX_A15_TYPE), $(TARGET_CPU_VARIANT)),)
     # Fake a ARM feature for LPAE support.
     ART_TARGET_CFLAGS += -D__ARM_FEATURE_LPAE=1
   endif
