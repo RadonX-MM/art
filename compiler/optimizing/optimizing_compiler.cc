@@ -101,30 +101,23 @@ CompiledMethod* OptimizingCompiler::TryCompile(const DexFile::CodeItem* code_ite
   bool shouldOptimize =
       dex_compilation_unit.GetSymbol().find("00024reg_00024") != std::string::npos;
 
-  if (instruction_set == kThumb2 && !kArm32QuickCodeUseSoftFloat) {
-    uint32_t shorty_len;
-    const char* shorty = dex_compilation_unit.GetShorty(&shorty_len);
-    for (uint32_t i = 0; i < shorty_len; ++i) {
-      if (shorty[i] == 'D' || shorty[i] == 'F') {
-        CHECK(!shouldCompile) << "Hard float ARM32 parameters are not yet supported";
-        return nullptr;
-      }
-    }
-  }
-
   ArenaPool pool;
   ArenaAllocator arena(&pool);
   HGraphBuilder builder(&arena, &dex_compilation_unit, &dex_file, GetCompilerDriver());
 
   HGraph* graph = builder.BuildGraph(*code_item);
   if (graph == nullptr) {
-    CHECK(!shouldCompile) << "Could not build graph in optimizing compiler";
+    if (shouldCompile) {
+      LOG(FATAL) << "Could not build graph in optimizing compiler";
+    }
     return nullptr;
   }
 
   CodeGenerator* codegen = CodeGenerator::Create(&arena, graph, instruction_set);
   if (codegen == nullptr) {
-    CHECK(!shouldCompile) << "Could not find code generator for optimizing compiler";
+    if (shouldCompile) {
+      LOG(FATAL) << "Could not find code generator for optimizing compiler";
+    }
     return nullptr;
   }
 
@@ -154,7 +147,6 @@ CompiledMethod* OptimizingCompiler::TryCompile(const DexFile::CodeItem* code_ite
     codegen->CompileOptimized(&allocator);
   } else if (shouldOptimize && RegisterAllocator::Supports(instruction_set)) {
     LOG(FATAL) << "Could not allocate registers in optimizing compiler";
-    UNREACHABLE();
   } else {
     codegen->CompileBaseline(&allocator);
 
