@@ -737,7 +737,6 @@ void Thumb2Assembler::Emit32BitDataProcessing(Condition cond,
 
   if (thumb_opcode == 0b11111111) {
     LOG(FATAL) << "Invalid thumb2 opcode " << opcode;
-    UNREACHABLE();
   }
 
   int32_t encoding = 0;
@@ -767,7 +766,6 @@ void Thumb2Assembler::Emit32BitDataProcessing(Condition cond,
       uint32_t imm = ModifiedImmediate(so.encodingThumb());
       if (imm == kInvalidModifiedImmediate) {
         LOG(FATAL) << "Immediate value cannot fit in thumb2 modified immediate";
-        UNREACHABLE();
       }
       encoding = B31 | B30 | B29 | B28 |
           thumb_opcode << 21 |
@@ -905,7 +903,6 @@ void Thumb2Assembler::Emit16BitDataProcessing(Condition cond,
 
   if (thumb_opcode == 0b11111111) {
     LOG(FATAL) << "Invalid thumb1 opcode " << opcode;
-    UNREACHABLE();
   }
 
   int16_t encoding = dp_opcode << 14 |
@@ -1043,7 +1040,7 @@ void Thumb2Assembler::Emit16BitAddSub(Condition cond,
       break;
     default:
       LOG(FATAL) << "This opcode is not an ADD or SUB: " << opcode;
-      UNREACHABLE();
+      return;
   }
 
   int16_t encoding = dp_opcode << 14 |
@@ -1084,7 +1081,6 @@ void Thumb2Assembler::EmitShift(Register rd, Register rm, Shift shift, uint8_t a
       case RRX: opcode = 0b11; amount = 0; break;
       default:
         LOG(FATAL) << "Unsupported thumb2 shift opcode";
-        UNREACHABLE();
     }
     // 32 bit.
     int32_t encoding = B31 | B30 | B29 | B27 | B25 | B22 |
@@ -1103,7 +1099,6 @@ void Thumb2Assembler::EmitShift(Register rd, Register rm, Shift shift, uint8_t a
       case ASR: opcode = 0b10; break;
       default:
         LOG(FATAL) << "Unsupported thumb2 shift opcode";
-        UNREACHABLE();
     }
     int16_t encoding = opcode << 11 | amount << 6 | static_cast<int16_t>(rm) << 3 |
         static_cast<int16_t>(rd);
@@ -1127,7 +1122,6 @@ void Thumb2Assembler::EmitShift(Register rd, Register rn, Shift shift, Register 
        case ROR: opcode = 0b11; break;
        default:
          LOG(FATAL) << "Unsupported thumb2 shift opcode";
-         UNREACHABLE();
      }
      // 32 bit.
      int32_t encoding = B31 | B30 | B29 | B28 | B27 | B25 |
@@ -1143,7 +1137,6 @@ void Thumb2Assembler::EmitShift(Register rd, Register rn, Shift shift, Register 
       case ASR: opcode = 0b0100; break;
       default:
         LOG(FATAL) << "Unsupported thumb2 shift opcode";
-        UNREACHABLE();
     }
     int16_t encoding = B14 | opcode << 6 | static_cast<int16_t>(rm) << 3 |
         static_cast<int16_t>(rd);
@@ -1172,7 +1165,6 @@ void Thumb2Assembler::Branch::Emit(AssemblerBuffer* buffer) const {
     } else {
       if (x) {
         LOG(FATAL) << "Invalid use of BX";
-        UNREACHABLE();
       } else {
         if (cond_ == AL) {
           // Can use the T4 encoding allowing a 24 bit offset.
@@ -1436,7 +1428,6 @@ void Thumb2Assembler::EmitMultiMemOp(Condition cond,
       case DA_W:
       case IB_W:
         LOG(FATAL) << "LDM/STM mode not supported on thumb: " << am;
-        UNREACHABLE();
     }
     if (load) {
       // Cannot have SP in the list.
@@ -2010,7 +2001,6 @@ void Thumb2Assembler::cbz(Register rn, Label* label) {
   CheckCondition(AL);
   if (label->IsBound()) {
     LOG(FATAL) << "cbz can only be used to branch forwards";
-    UNREACHABLE();
   } else {
     uint16_t branchid = EmitCompareAndBranch(rn, static_cast<uint16_t>(label->position_), false);
     label->LinkTo(branchid);
@@ -2022,7 +2012,6 @@ void Thumb2Assembler::cbnz(Register rn, Label* label) {
   CheckCondition(AL);
   if (label->IsBound()) {
     LOG(FATAL) << "cbnz can only be used to branch forwards";
-    UNREACHABLE();
   } else {
     uint16_t branchid = EmitCompareAndBranch(rn, static_cast<uint16_t>(label->position_), true);
     label->LinkTo(branchid);
