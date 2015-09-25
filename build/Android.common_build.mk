@@ -187,7 +187,6 @@ endif
 
 art_non_debug_cflags := \
   -O3 \
-  -flto \
   -DNDEBUG
 
 art_host_non_debug_cflags := \
