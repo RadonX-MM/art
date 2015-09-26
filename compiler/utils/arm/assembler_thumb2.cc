@@ -1393,8 +1393,7 @@ void Thumb2Assembler::EmitMultiMemOp(Condition cond,
   CheckCondition(cond);
   bool must_be_32bit = force_32bit_;
 
-  if (!must_be_32bit && base == SP && bam == (load ? IA_W : DB_W) &&
-      (regs & 0xff00 & ~(1 << (load ? PC : LR))) == 0) {
+  if (!must_be_32bit && base == SP && (regs & 0xff00 & ~(1 << (load ? PC : LR))) == 0) {
     // Use 16-bit PUSH/POP.
     int16_t encoding = B15 | B13 | B12 | (load ? B11 : 0) | B10 |
         ((regs & (1 << (load ? PC : LR))) != 0 ? B8 : 0) | (regs & 0x00ff);
