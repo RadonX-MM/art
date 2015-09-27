@@ -149,9 +149,8 @@ RegLocation Mir2Lir::LoadValue(RegLocation rl_src, RegisterClass op_kind) {
       // Wrong register class, realloc, copy and transfer ownership.
       RegStorage new_reg = AllocTypedTemp(rl_src.fp, op_kind);
       OpRegCopy(new_reg, rl_src.reg);
-      // Clobber the old regs and free it.
+      // Clobber the old reg.
       Clobber(rl_src.reg);
-      FreeTemp(rl_src.reg);
       // ...and mark the new one live.
       rl_src.reg = new_reg;
       MarkLive(rl_src);
@@ -237,9 +236,8 @@ RegLocation Mir2Lir::LoadValueWide(RegLocation rl_src, RegisterClass op_kind) {
       // Wrong register class, realloc, copy and transfer ownership.
       RegStorage new_regs = AllocTypedTempWide(rl_src.fp, op_kind);
       OpRegCopyWide(new_regs, rl_src.reg);
-      // Clobber the old regs and free it.
+      // Clobber the old regs.
       Clobber(rl_src.reg);
-      FreeTemp(rl_src.reg);
       // ...and mark the new ones live.
       rl_src.reg = new_regs;
       MarkLive(rl_src);
