@@ -733,11 +733,11 @@ CompiledMethod* QuickCompiler::Compile(const DexFile::CodeItem* code_item,
   PassDriverMEOpts pass_driver(GetPreOptPassManager(), GetPostOptPassManager(), &cu);
   pass_driver.Launch();
 
-  if (GetCheckBailOutFlag() && cu.mir_graph->PassFailed()) {
+  if (check_bail_out && cu.mir_graph->PassFailed()) {
     return nullptr;
   }
 
-  if (GetCheckBailOutFlag()) {
+  if (check_bail_out) {
     VLOG(compiler) << "fast compile applied to " << PrettyMethod(method_idx, dex_file);
   }
 
@@ -869,7 +869,6 @@ QuickCompiler::QuickCompiler(CompilerDriver* driver) : Compiler(driver, 100) {
   if (pass_manager_options->GetPrintPassOptions()) {
     PassDriverMEPostOpt::PrintPassOptions(post_opt_pass_manager_.get());
   }
-  check_bail_out_ = false;
 }
 
 QuickCompiler::~QuickCompiler() {
