@@ -86,6 +86,7 @@ include $(art_path)/patchoat/Android.mk
 include $(art_path)/dalvikvm/Android.mk
 include $(art_path)/tools/Android.mk
 include $(art_path)/tools/dexfuzz/Android.mk
+include $(art_path)/tools/dmtracedump/Android.mk
 include $(art_path)/sigchainlib/Android.mk
 
 
