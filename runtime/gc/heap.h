@@ -686,9 +686,6 @@ class Heap {
   void DumpGcCountRateHistogram(std::ostream& os) const;
   void DumpBlockingGcCountRateHistogram(std::ostream& os) const;
 
-  // Whether or not we may use a garbage collector, used so that we only create collectors we need.
-  bool MayUseCollector(CollectorType type) const;
-
  private:
   class ConcurrentGCTask;
   class CollectorTransitionTask;
