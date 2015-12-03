@@ -38,21 +38,8 @@ ART_BUILD_HOST_DEBUG := false
 ART_NDEBUG_OPT_FLAG ?= -O3
 ART_DEBUG_OPT_FLAG := $(ART_NDEBUG_OPT_FLAG)
 
-# Enable the static builds only for checkbuilds.
-ifneq (,$(filter checkbuild,$(MAKECMDGOALS)))
-  ART_BUILD_HOST_STATIC ?= true
-else
-  ART_BUILD_HOST_STATIC ?= false
-endif
-
-# Asan does not support static linkage
-ifdef SANITIZE_HOST
-  ART_BUILD_HOST_STATIC := false
-endif
-
-ifneq ($(HOST_OS),linux)
-  ART_BUILD_HOST_STATIC := false
-endif
+# Disable static builds always
+ART_BUILD_HOST_STATIC := false
 
 ifeq ($(ART_BUILD_TARGET_NDEBUG),false)
 $(info Disabling ART_BUILD_TARGET_NDEBUG)
@@ -65,9 +52,6 @@ $(info Disabling ART_BUILD_HOST_NDEBUG)
 endif
 ifeq ($(ART_BUILD_HOST_DEBUG),false)
 $(info Disabling ART_BUILD_HOST_DEBUG)
-endif
-ifeq ($(ART_BUILD_HOST_STATIC),true)
-$(info Enabling ART_BUILD_HOST_STATIC)
 endif
 
 ifeq ($(ART_TEST_DEBUG_GC),true)
@@ -121,71 +105,9 @@ define set-target-local-clang-vars
       endif)
 endef
 
-ART_TARGET_CLANG_CFLAGS :=
-ART_TARGET_CLANG_CFLAGS_arm :=
-ART_TARGET_CLANG_CFLAGS_arm64 :=
-ART_TARGET_CLANG_CFLAGS_mips :=
-ART_TARGET_CLANG_CFLAGS_mips64 :=
-ART_TARGET_CLANG_CFLAGS_x86 :=
-ART_TARGET_CLANG_CFLAGS_x86_64 :=
-
-# Warn about thread safety violations with clang.
-art_clang_cflags := -Wthread-safety -Wthread-safety-negative
-
-# Warn if switch fallthroughs aren't annotated.
-art_clang_cflags += -Wimplicit-fallthrough
-
-# Enable float equality warnings.
-art_clang_cflags += -Wfloat-equal
-
-# Enable warning of converting ints to void*.
-art_clang_cflags += -Wint-to-void-pointer-cast
-
-# Enable warning of wrong unused annotations.
-art_clang_cflags += -Wused-but-marked-unused
-
-# Enable warning for deprecated language features.
-art_clang_cflags += -Wdeprecated
-
-# Enable warning for unreachable break & return.
-art_clang_cflags += -Wunreachable-code-break -Wunreachable-code-return
-
-# Enable missing-noreturn only on non-Mac. As lots of things are not implemented for Apple, it's
-# a pain.
-ifneq ($(HOST_OS),darwin)
-  art_clang_cflags += -Wmissing-noreturn
-endif
-
-
-# GCC-only warnings.
-art_gcc_cflags := -Wunused-but-set-parameter
-# Suggest const: too many false positives, but good for a trial run.
-#                  -Wsuggest-attribute=const
-# Useless casts: too many, as we need to be 32/64 agnostic, but the compiler knows.
-#                  -Wuseless-cast
-# Zero-as-null: Have to convert all NULL and "diagnostic ignore" all includes like libnativehelper
-# that are still stuck pre-C++11.
-#                  -Wzero-as-null-pointer-constant \
-# Suggest final: Have to move to a more recent GCC.
-#                  -Wsuggest-final-types
-
-ART_TARGET_CLANG_CFLAGS := $(art_clang_cflags)
-ifeq ($(ART_HOST_CLANG),true)
-  # Bug: 15446488. We don't omit the frame pointer to work around
-  # clang/libunwind bugs that cause SEGVs in run-test-004-ThreadStress.
-  ART_HOST_CFLAGS += $(art_clang_cflags) -fno-omit-frame-pointer
-else
-  ART_HOST_CFLAGS += $(art_gcc_cflags)
-endif
-ifneq ($(ART_TARGET_CLANG),true)
-  ART_TARGET_CFLAGS += $(art_gcc_cflags)
-else
-  # TODO: if we ever want to support GCC/Clang mix for multi-target products, this needs to be
-  #       split up.
-  ifeq ($(ART_TARGET_CLANG_$(TARGET_ARCH)),false)
-    ART_TARGET_CFLAGS += $(art_gcc_cflags)
-  endif
-endif
+# Make sure GCC flags are used
+ART_HOST_CFLAGS += $(art_gcc_cflags)
+ART_TARGET_CFLAGS += $(art_gcc_cflags)
 
 # Clear local variables now their use has ended.
 art_clang_cflags :=
@@ -210,16 +132,12 @@ ART_C_INCLUDES += bionic/libc/private
 art_cflags := \
   -fno-rtti \
   -std=gnu++11 \
-  -ggdb3 \
-  -Wall \
-  -Werror \
-  -Wextra \
+  -g0 \
+  -Wno-error \
   -Wstrict-aliasing \
   -fstrict-aliasing \
   -Wunreachable-code \
   -Wredundant-decls \
-  -Wshadow \
-  -Wunused \
   -fvisibility=protected \
   $(art_default_gc_type_cflags)
 
@@ -343,12 +261,6 @@ ART_HOST_CFLAGS += $(art_cflags) -DART_BASE_ADDRESS=$(LIBART_IMG_HOST_BASE_ADDRE
 ART_HOST_CFLAGS += -DART_DEFAULT_INSTRUCTION_SET_FEATURES=default $(art_host_cflags)
 ART_HOST_ASFLAGS += $(art_asflags)
 
-# The latest clang update trips over many of the files in art and never finishes
-# compiling for aarch64 with -O3 (or -O2). Drop back to -O1 while we investigate
-# to stop punishing the build server.
-# Bug: http://b/23256622
-ART_TARGET_CLANG_CFLAGS_arm64 += -O1
-
 ifndef LIBART_IMG_TARGET_BASE_ADDRESS
   $(error LIBART_IMG_TARGET_BASE_ADDRESS unset)
 endif
@@ -358,8 +270,8 @@ ART_TARGET_ASFLAGS += $(art_asflags)
 
 ART_HOST_NON_DEBUG_CFLAGS := $(art_host_non_debug_cflags)
 ART_TARGET_NON_DEBUG_CFLAGS := $(art_target_non_debug_cflags)
-ART_HOST_DEBUG_CFLAGS := $(art_debug_cflags)
-ART_TARGET_DEBUG_CFLAGS := $(art_debug_cflags)
+ART_HOST_DEBUG_CFLAGS := $(art_host_non_debug_cflags)
+ART_TARGET_DEBUG_CFLAGS := $(art_target_non_debug_cflags)
 
 ifndef LIBART_IMG_HOST_MIN_BASE_ADDRESS_DELTA
   LIBART_IMG_HOST_MIN_BASE_ADDRESS_DELTA=-0x1000000
@@ -393,10 +305,8 @@ art_host_non_debug_cflags :=
 art_target_non_debug_cflags :=
 art_default_gc_type_cflags :=
 
-ART_HOST_LDLIBS :=
-ifneq ($(ART_HOST_CLANG),true)
-  # GCC lacks libc++ assumed atomic operations, grab via libatomic.
-  ART_HOST_LDLIBS += -latomic
+# GCC lacks libc++ assumed atomic operations, grab via libatomic.
+ART_HOST_LDLIBS := -latomic
 endif
 
 ART_TARGET_LDFLAGS :=
@@ -407,19 +317,10 @@ define set-target-local-cflags-vars
   LOCAL_CFLAGS_x86 += $(ART_TARGET_CFLAGS_x86)
   LOCAL_ASFLAGS += $(ART_TARGET_ASFLAGS)
   LOCAL_LDFLAGS += $(ART_TARGET_LDFLAGS)
-  art_target_cflags_ndebug_or_debug := $(1)
-  ifeq ($$(art_target_cflags_ndebug_or_debug),debug)
-    LOCAL_CFLAGS += $(ART_TARGET_DEBUG_CFLAGS)
-  else
-    LOCAL_CFLAGS += $(ART_TARGET_NON_DEBUG_CFLAGS)
-  endif
-
+  LOCAL_CFLAGS += $(ART_TARGET_NON_DEBUG_CFLAGS)
   LOCAL_CLANG_CFLAGS := $(ART_TARGET_CLANG_CFLAGS)
   $(foreach arch,$(ART_TARGET_SUPPORTED_ARCH),
     LOCAL_CLANG_CFLAGS_$(arch) += $$(ART_TARGET_CLANG_CFLAGS_$(arch)))
-
-  # Clear locally used variables.
-  art_target_cflags_ndebug_or_debug :=
 endef
 
 # Support for disabling certain builds.
