@@ -35,8 +35,8 @@ ART_BUILD_HOST_NDEBUG := true
 ART_BUILD_HOST_DEBUG := false
 
 # Set this to change what opt level Art is built at.
-ART_DEBUG_OPT_FLAG ?= -O2
 ART_NDEBUG_OPT_FLAG ?= -O3
+ART_DEBUG_OPT_FLAG := $(ART_NDEBUG_OPT_FLAG)
 
 # Enable the static builds only for checkbuilds.
 ifneq (,$(filter checkbuild,$(MAKECMDGOALS)))
