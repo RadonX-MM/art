@@ -17,6 +17,7 @@
 #ifndef ART_COMPILER_OPTIMIZING_BUILDER_H_
 #define ART_COMPILER_OPTIMIZING_BUILDER_H_
 
+#include "base/arena_containers.h"
 #include "base/arena_object.h"
 #include "dex_file.h"
 #include "dex_file-inl.h"
@@ -24,7 +25,6 @@
 #include "driver/dex_compilation_unit.h"
 #include "optimizing_compiler_stats.h"
 #include "primitive.h"
-#include "utils/growable_array.h"
 #include "nodes.h"
 
 namespace art {
@@ -39,10 +39,12 @@ class HGraphBuilder : public ValueObject {
                 const DexCompilationUnit* const outer_compilation_unit,
                 const DexFile* dex_file,
                 CompilerDriver* driver,
-                OptimizingCompilerStats* compiler_stats)
+                OptimizingCompilerStats* compiler_stats,
+                const uint8_t* interpreter_metadata,
+                Handle<mirror::DexCache> dex_cache)
       : arena_(graph->GetArena()),
-        branch_targets_(graph->GetArena(), 0),
-        locals_(graph->GetArena(), 0),
+        branch_targets_(graph->GetArena()->Adapter(kArenaAllocGraphBuilder)),
+        locals_(graph->GetArena()->Adapter(kArenaAllocGraphBuilder)),
         entry_block_(nullptr),
         exit_block_(nullptr),
         current_block_(nullptr),
@@ -54,13 +56,16 @@ class HGraphBuilder : public ValueObject {
         return_type_(Primitive::GetType(dex_compilation_unit_->GetShorty()[0])),
         code_start_(nullptr),
         latest_result_(nullptr),
-        compilation_stats_(compiler_stats) {}
+        can_use_baseline_for_string_init_(true),
+        compilation_stats_(compiler_stats),
+        interpreter_metadata_(interpreter_metadata),
+        dex_cache_(dex_cache) {}
 
   // Only for unit testing.
   HGraphBuilder(HGraph* graph, Primitive::Type return_type = Primitive::kPrimInt)
       : arena_(graph->GetArena()),
-        branch_targets_(graph->GetArena(), 0),
-        locals_(graph->GetArena(), 0),
+        branch_targets_(graph->GetArena()->Adapter(kArenaAllocGraphBuilder)),
+        locals_(graph->GetArena()->Adapter(kArenaAllocGraphBuilder)),
         entry_block_(nullptr),
         exit_block_(nullptr),
         current_block_(nullptr),
@@ -72,11 +77,21 @@ class HGraphBuilder : public ValueObject {
         return_type_(return_type),
         code_start_(nullptr),
         latest_result_(nullptr),
-        compilation_stats_(nullptr) {}
+        can_use_baseline_for_string_init_(true),
+        compilation_stats_(nullptr),
+        interpreter_metadata_(nullptr),
+        dex_cache_(NullHandle<mirror::DexCache>()) {}
 
   bool BuildGraph(const DexFile::CodeItem& code);
 
+  bool CanUseBaselineForStringInit() const {
+    return can_use_baseline_for_string_init_;
+  }
+
   static constexpr const char* kBuilderPassName = "builder";
+
+  // The number of entries in a packed switch before we use a jump table.
+  static constexpr uint16_t kSmallSwitchThreshold = 5;
 
  private:
   // Analyzes the dex instruction and adds HInstruction to the graph
@@ -94,48 +109,65 @@ class HGraphBuilder : public ValueObject {
   bool ComputeBranchTargets(const uint16_t* start,
                             const uint16_t* end,
                             size_t* number_of_branches);
-  void MaybeUpdateCurrentBlock(size_t index);
-  HBasicBlock* FindBlockStartingAt(int32_t index) const;
+  void MaybeUpdateCurrentBlock(size_t dex_pc);
+  HBasicBlock* FindBlockStartingAt(int32_t dex_pc) const;
+  HBasicBlock* FindOrCreateBlockStartingAt(int32_t dex_pc);
+
+  // Adds new blocks to `branch_targets_` starting at the limits of TryItems and
+  // their exception handlers.
+  void CreateBlocksForTryCatch(const DexFile::CodeItem& code_item);
+
+  // Splits edges which cross the boundaries of TryItems, inserts TryBoundary
+  // instructions and links them to the corresponding catch blocks.
+  void InsertTryBoundaryBlocks(const DexFile::CodeItem& code_item);
+
+  // Iterates over the exception handlers of `try_item`, finds the corresponding
+  // catch blocks and makes them successors of `try_boundary`. The order of
+  // successors matches the order in which runtime exception delivery searches
+  // for a handler.
+  void LinkToCatchBlocks(HTryBoundary* try_boundary,
+                         const DexFile::CodeItem& code_item,
+                         const DexFile::TryItem* try_item);
+
+  bool CanDecodeQuickenedInfo() const;
+  uint16_t LookupQuickenedInfo(uint32_t dex_pc);
 
   void InitializeLocals(uint16_t count);
-  HLocal* GetLocalAt(int register_index) const;
-  void UpdateLocal(int register_index, HInstruction* instruction) const;
-  HInstruction* LoadLocal(int register_index, Primitive::Type type) const;
+  HLocal* GetLocalAt(uint32_t register_index) const;
+  void UpdateLocal(uint32_t register_index, HInstruction* instruction, uint32_t dex_pc) const;
+  HInstruction* LoadLocal(uint32_t register_index, Primitive::Type type, uint32_t dex_pc) const;
   void PotentiallyAddSuspendCheck(HBasicBlock* target, uint32_t dex_pc);
   void InitializeParameters(uint16_t number_of_parameters);
-  bool NeedsAccessCheck(uint32_t type_index) const;
+
+  // Returns whether the current method needs access check for the type.
+  // Output parameter finalizable is set to whether the type is finalizable.
+  bool NeedsAccessCheck(uint32_t type_index, /*out*/bool* finalizable) const;
 
   template<typename T>
-  void Unop_12x(const Instruction& instruction, Primitive::Type type);
-
-  template<typename T>
-  void Binop_23x(const Instruction& instruction, Primitive::Type type);
+  void Unop_12x(const Instruction& instruction, Primitive::Type type, uint32_t dex_pc);
 
   template<typename T>
   void Binop_23x(const Instruction& instruction, Primitive::Type type, uint32_t dex_pc);
 
   template<typename T>
-  void Binop_23x_shift(const Instruction& instruction, Primitive::Type type);
+  void Binop_23x_shift(const Instruction& instruction, Primitive::Type type, uint32_t dex_pc);
 
   void Binop_23x_cmp(const Instruction& instruction,
                      Primitive::Type type,
-                     HCompare::Bias bias,
+                     ComparisonBias bias,
                      uint32_t dex_pc);
-
-  template<typename T>
-  void Binop_12x(const Instruction& instruction, Primitive::Type type);
 
   template<typename T>
   void Binop_12x(const Instruction& instruction, Primitive::Type type, uint32_t dex_pc);
 
   template<typename T>
-  void Binop_12x_shift(const Instruction& instruction, Primitive::Type type);
+  void Binop_12x_shift(const Instruction& instruction, Primitive::Type type, uint32_t dex_pc);
 
   template<typename T>
-  void Binop_22b(const Instruction& instruction, bool reverse);
+  void Binop_22b(const Instruction& instruction, bool reverse, uint32_t dex_pc);
 
   template<typename T>
-  void Binop_22s(const Instruction& instruction, bool reverse);
+  void Binop_22s(const Instruction& instruction, bool reverse, uint32_t dex_pc);
 
   template<typename T> void If_21t(const Instruction& instruction, uint32_t dex_pc);
   template<typename T> void If_22t(const Instruction& instruction, uint32_t dex_pc);
@@ -153,11 +185,15 @@ class HGraphBuilder : public ValueObject {
                           bool second_is_lit,
                           bool is_div);
 
-  void BuildReturn(const Instruction& instruction, Primitive::Type type);
+  void BuildReturn(const Instruction& instruction, Primitive::Type type, uint32_t dex_pc);
 
   // Builds an instance field access node and returns whether the instruction is supported.
   bool BuildInstanceFieldAccess(const Instruction& instruction, uint32_t dex_pc, bool is_put);
 
+  void BuildUnresolvedStaticFieldAccess(const Instruction& instruction,
+                                        uint32_t dex_pc,
+                                        bool is_put,
+                                        Primitive::Type field_type);
   // Builds a static field access node and returns whether the instruction is supported.
   bool BuildStaticFieldAccess(const Instruction& instruction, uint32_t dex_pc, bool is_put);
 
@@ -203,8 +239,7 @@ class HGraphBuilder : public ValueObject {
                               uint32_t dex_pc);
 
   // Builds a `HInstanceOf`, or a `HCheckCast` instruction.
-  // Returns whether we succeeded in building the instruction.
-  bool BuildTypeCheck(const Instruction& instruction,
+  void BuildTypeCheck(const Instruction& instruction,
                       uint8_t destination,
                       uint8_t reference,
                       uint16_t type_index,
@@ -212,6 +247,12 @@ class HGraphBuilder : public ValueObject {
 
   // Builds an instruction sequence for a packed switch statement.
   void BuildPackedSwitch(const Instruction& instruction, uint32_t dex_pc);
+
+  // Build a switch instruction from a packed switch statement.
+  void BuildSwitchJumpTable(const SwitchTable& table,
+                            const Instruction& instruction,
+                            HInstruction* value,
+                            uint32_t dex_pc);
 
   // Builds an instruction sequence for a sparse switch statement.
   void BuildSparseSwitch(const Instruction& instruction, uint32_t dex_pc);
@@ -234,14 +275,60 @@ class HGraphBuilder : public ValueObject {
   // Returns whether `type_index` points to the outer-most compiling method's class.
   bool IsOutermostCompilingClass(uint16_t type_index) const;
 
+  void PotentiallySimplifyFakeString(uint16_t original_dex_register,
+                                     uint32_t dex_pc,
+                                     HInvoke* invoke);
+
+  bool SetupInvokeArguments(HInvoke* invoke,
+                            uint32_t number_of_vreg_arguments,
+                            uint32_t* args,
+                            uint32_t register_index,
+                            bool is_range,
+                            const char* descriptor,
+                            size_t start_index,
+                            size_t* argument_index);
+
+  bool HandleInvoke(HInvoke* invoke,
+                    uint32_t number_of_vreg_arguments,
+                    uint32_t* args,
+                    uint32_t register_index,
+                    bool is_range,
+                    const char* descriptor,
+                    HClinitCheck* clinit_check);
+
+  bool HandleStringInit(HInvoke* invoke,
+                        uint32_t number_of_vreg_arguments,
+                        uint32_t* args,
+                        uint32_t register_index,
+                        bool is_range,
+                        const char* descriptor);
+
+  HClinitCheck* ProcessClinitCheckForInvoke(
+      uint32_t dex_pc,
+      ArtMethod* method,
+      uint32_t method_idx,
+      HInvokeStaticOrDirect::ClinitCheckRequirement* clinit_check_requirement)
+      SHARED_REQUIRES(Locks::mutator_lock_);
+
+  // Build a HNewInstance instruction.
+  bool BuildNewInstance(uint16_t type_index, uint32_t dex_pc);
+
+  // Return whether the compiler can assume `cls` is initialized.
+  bool IsInitialized(Handle<mirror::Class> cls) const
+      SHARED_REQUIRES(Locks::mutator_lock_);
+
+  // Try to resolve a method using the class linker. Return null if a method could
+  // not be resolved.
+  ArtMethod* ResolveMethod(uint16_t method_idx, InvokeType invoke_type);
+
   ArenaAllocator* const arena_;
 
   // A list of the size of the dex code holding block information for
   // the method. If an entry contains a block, then the dex instruction
   // starting at that entry is the first instruction of a new block.
-  GrowableArray<HBasicBlock*> branch_targets_;
+  ArenaVector<HBasicBlock*> branch_targets_;
 
-  GrowableArray<HLocal*> locals_;
+  ArenaVector<HLocal*> locals_;
 
   HBasicBlock* entry_block_;
   HBasicBlock* exit_block_;
@@ -273,7 +360,17 @@ class HGraphBuilder : public ValueObject {
   // used by move-result instructions.
   HInstruction* latest_result_;
 
+  // We need to know whether we have built a graph that has calls to StringFactory
+  // and hasn't gone through the verifier. If the following flag is `false`, then
+  // we cannot compile with baseline.
+  bool can_use_baseline_for_string_init_;
+
   OptimizingCompilerStats* compilation_stats_;
+
+  const uint8_t* interpreter_metadata_;
+
+  // Dex cache for dex_file_.
+  Handle<mirror::DexCache> dex_cache_;
 
   DISALLOW_COPY_AND_ASSIGN(HGraphBuilder);
 };

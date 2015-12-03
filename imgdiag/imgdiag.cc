@@ -56,7 +56,7 @@ class ImgDiagDumper {
         image_location_(image_location),
         image_diff_pid_(image_diff_pid) {}
 
-  bool Dump() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+  bool Dump() SHARED_REQUIRES(Locks::mutator_lock_) {
     std::ostream& os = *os_;
     os << "MAGIC: " << image_header_.GetMagic() << "\n\n";
 
@@ -92,7 +92,7 @@ class ImgDiagDumper {
     return str.substr(idx + 1);
   }
 
-  bool DumpImageDiff(pid_t image_diff_pid) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+  bool DumpImageDiff(pid_t image_diff_pid) SHARED_REQUIRES(Locks::mutator_lock_) {
     std::ostream& os = *os_;
 
     {
@@ -140,7 +140,7 @@ class ImgDiagDumper {
 
     // Look at /proc/$pid/mem and only diff the things from there
   bool DumpImageDiffMap(pid_t image_diff_pid, const backtrace_map_t& boot_map)
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    SHARED_REQUIRES(Locks::mutator_lock_) {
     std::ostream& os = *os_;
     const size_t pointer_size = InstructionSetPointerSize(
         Runtime::Current()->GetInstructionSet());
@@ -548,10 +548,6 @@ class ImgDiagDumper {
           os << "  entryPointFromJni: "
              << reinterpret_cast<const void*>(
                     art_method->GetEntryPointFromJniPtrSize(pointer_size)) << ", ";
-          os << "  entryPointFromInterpreter: "
-             << reinterpret_cast<const void*>(
-                    art_method->GetEntryPointFromInterpreterPtrSize(pointer_size))
-             << ", ";
           os << "  entryPointFromQuickCompiledCode: "
              << reinterpret_cast<const void*>(
                     art_method->GetEntryPointFromQuickCompiledCodePtrSize(pointer_size))
@@ -631,10 +627,6 @@ class ImgDiagDumper {
           os << "  entryPointFromJni: "
              << reinterpret_cast<const void*>(
                     art_method->GetEntryPointFromJniPtrSize(pointer_size)) << ", ";
-          os << "  entryPointFromInterpreter: "
-             << reinterpret_cast<const void*>(
-                    art_method->GetEntryPointFromInterpreterPtrSize(pointer_size))
-             << ", ";
           os << "  entryPointFromQuickCompiledCode: "
              << reinterpret_cast<const void*>(
                     art_method->GetEntryPointFromQuickCompiledCodePtrSize(pointer_size))
@@ -691,7 +683,7 @@ class ImgDiagDumper {
   }
 
   static std::string GetClassDescriptor(mirror::Class* klass)
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    SHARED_REQUIRES(Locks::mutator_lock_) {
     CHECK(klass != nullptr);
 
     std::string descriptor;
@@ -822,7 +814,7 @@ class ImgDiagDumper {
 
   static const ImageHeader& GetBootImageHeader() {
     gc::Heap* heap = Runtime::Current()->GetHeap();
-    gc::space::ImageSpace* image_space = heap->GetImageSpace();
+    gc::space::ImageSpace* image_space = heap->GetBootImageSpace();
     CHECK(image_space != nullptr);
     const ImageHeader& image_header = image_space->GetImageHeader();
     return image_header;
@@ -846,7 +838,7 @@ static int DumpImage(Runtime* runtime, const char* image_location,
                      std::ostream* os, pid_t image_diff_pid) {
   ScopedObjectAccess soa(Thread::Current());
   gc::Heap* heap = runtime->GetHeap();
-  gc::space::ImageSpace* image_space = heap->GetImageSpace();
+  gc::space::ImageSpace* image_space = heap->GetBootImageSpace();
   CHECK(image_space != nullptr);
   const ImageHeader& image_header = image_space->GetImageHeader();
   if (!image_header.IsValid()) {

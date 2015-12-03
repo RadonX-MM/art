@@ -89,7 +89,6 @@
     # load appropriate callee-save-method
     ld      $t1, %got(_ZN3art7Runtime9instance_E)($gp)
     ld      $t1, 0($t1)
-    THIS_LOAD_REQUIRES_READ_BARRIER
     ld      $t1, RUNTIME_SAVE_ALL_CALLEE_SAVE_FRAME_OFFSET($t1)
     sd      $t1, 0($sp)                                # Place ArtMethod* at bottom of stack.
     sd      $sp, THREAD_TOP_QUICK_FRAME_OFFSET(rSELF)  # Place sp in Thread::Current()->top_quick_frame.
@@ -132,7 +131,6 @@
     # load appropriate callee-save-method
     ld      $t1, %got(_ZN3art7Runtime9instance_E)($gp)
     ld      $t1, 0($t1)
-    THIS_LOAD_REQUIRES_READ_BARRIER
     ld      $t1, RUNTIME_REFS_ONLY_CALLEE_SAVE_FRAME_OFFSET($t1)
     sd      $t1, 0($sp)                                # Place Method* at bottom of stack.
     sd      $sp, THREAD_TOP_QUICK_FRAME_OFFSET(rSELF)  # Place sp in Thread::Current()->top_quick_frame.
@@ -255,7 +253,6 @@
     # load appropriate callee-save-method
     ld      $t1, %got(_ZN3art7Runtime9instance_E)($gp)
     ld      $t1, 0($t1)
-    THIS_LOAD_REQUIRES_READ_BARRIER
     ld      $t1, RUNTIME_REFS_AND_ARGS_CALLEE_SAVE_FRAME_OFFSET($t1)
     sd      $t1, 0($sp)                                # Place Method* at bottom of stack.
     sd      $sp, THREAD_TOP_QUICK_FRAME_OFFSET(rSELF)  # Place sp in Thread::Current()->top_quick_frame.
@@ -434,7 +431,7 @@ ENTRY_NO_GP art_quick_do_long_jump
     ld      $ra, 248($a0)
     ld      $a0, 32($a0)
     move    $v0, $zero          # clear result registers v0 and v1
-    jalr    $zero, $ra          # do long jump
+    jalr    $zero, $t9          # do long jump (do not use ra, it must not be clobbered)
     move    $v1, $zero
 END art_quick_do_long_jump
 
@@ -525,14 +522,12 @@ END art_quick_throw_no_such_method
      * On success this wrapper will restore arguments and *jump* to the target, leaving the ra
      * pointing back to the original caller.
      */
-.macro INVOKE_TRAMPOLINE c_name, cxx_name
+.macro INVOKE_TRAMPOLINE_BODY cxx_name
     .extern \cxx_name
-ENTRY \c_name
     SETUP_REFS_AND_ARGS_CALLEE_SAVE_FRAME  # save callee saves in case allocation triggers GC
-    ld    $a2, FRAME_SIZE_REFS_AND_ARGS_CALLEE_SAVE($sp)  # pass caller Method*
-    move  $a3, rSELF                       # pass Thread::Current
-    jal   \cxx_name                        # (method_idx, this, caller, Thread*, $sp)
-    move  $a4, $sp                         # pass $sp
+    move  $a2, rSELF                       # pass Thread::Current
+    jal   \cxx_name                        # (method_idx, this, Thread*, $sp)
+    move  $a3, $sp                         # pass $sp
     move  $a0, $v0                         # save target Method*
     move  $t9, $v1                         # save $v0->code_
     RESTORE_REFS_AND_ARGS_CALLEE_SAVE_FRAME
@@ -542,10 +537,13 @@ ENTRY \c_name
     nop
 1:
     DELIVER_PENDING_EXCEPTION
+.endm
+.macro INVOKE_TRAMPOLINE c_name, cxx_name
+ENTRY \c_name
+    INVOKE_TRAMPOLINE_BODY \cxx_name
 END \c_name
 .endm
 
-INVOKE_TRAMPOLINE art_quick_invoke_interface_trampoline, artInvokeInterfaceTrampoline
 INVOKE_TRAMPOLINE art_quick_invoke_interface_trampoline_with_access_check, artInvokeInterfaceTrampolineWithAccessCheck
 
 INVOKE_TRAMPOLINE art_quick_invoke_static_trampoline_with_access_check, artInvokeStaticTrampolineWithAccessCheck
@@ -887,6 +885,77 @@ ENTRY art_quick_check_cast
     move $a2, rSELF                 # pass Thread::Current
 END art_quick_check_cast
 
+
+    /*
+     * Restore rReg's value from offset($sp) if rReg is not the same as rExclude.
+     * nReg is the register number for rReg.
+     */
+.macro POP_REG_NE rReg, nReg, offset, rExclude
+    .ifnc \rReg, \rExclude
+        ld \rReg, \offset($sp)      # restore rReg
+        .cfi_restore \nReg
+    .endif
+.endm
+
+    /*
+     * Macro to insert read barrier, only used in art_quick_aput_obj.
+     * rObj and rDest are registers, offset is a defined literal such as MIRROR_OBJECT_CLASS_OFFSET.
+     * TODO: When read barrier has a fast path, add heap unpoisoning support for the fast path.
+     */
+.macro READ_BARRIER rDest, rObj, offset
+#ifdef USE_READ_BARRIER
+    # saved registers used in art_quick_aput_obj: a0-a2, t0-t1, t9, ra. 16B-aligned.
+    daddiu  $sp, $sp, -64
+    .cfi_adjust_cfa_offset 64
+    sd     $ra, 56($sp)
+    .cfi_rel_offset 31, 56
+    sd     $t9, 48($sp)
+    .cfi_rel_offset 25, 48
+    sd     $t1, 40($sp)
+    .cfi_rel_offset 13, 40
+    sd     $t0, 32($sp)
+    .cfi_rel_offset 12, 32
+    sd     $a2, 16($sp)             # padding slot at offset 24 (padding can be any slot in the 64B)
+    .cfi_rel_offset 6, 16
+    sd     $a1, 8($sp)
+    .cfi_rel_offset 5, 8
+    sd     $a0, 0($sp)
+    .cfi_rel_offset 4, 0
+
+    # move $a0, \rRef               # pass ref in a0 (no-op for now since parameter ref is unused)
+    .ifnc \rObj, $a1
+        move $a1, \rObj             # pass rObj
+    .endif
+    daddiu $a2, $zero, \offset      # pass offset
+    jal artReadBarrierSlow          # artReadBarrierSlow(ref, rObj, offset)
+    .cpreturn                       # Restore gp from t8 in branch delay slot.
+                                    # t8 may be clobbered in artReadBarrierSlow.
+    # No need to unpoison return value in v0, artReadBarrierSlow() would do the unpoisoning.
+    move \rDest, $v0                # save return value in rDest
+                                    # (rDest cannot be v0 in art_quick_aput_obj)
+
+    ld     $a0, 0($sp)              # restore registers except rDest
+                                    # (rDest can only be t0 or t1 in art_quick_aput_obj)
+    .cfi_restore 4
+    ld     $a1, 8($sp)
+    .cfi_restore 5
+    ld     $a2, 16($sp)
+    .cfi_restore 6
+    POP_REG_NE $t0, 12, 32, \rDest
+    POP_REG_NE $t1, 13, 40, \rDest
+    ld     $t9, 48($sp)
+    .cfi_restore 25
+    ld     $ra, 56($sp)             # restore $ra
+    .cfi_restore 31
+    daddiu  $sp, $sp, 64
+    .cfi_adjust_cfa_offset -64
+    SETUP_GP                        # set up gp because we are not returning
+#else
+    lwu     \rDest, \offset(\rObj)
+    UNPOISON_HEAP_REF \rDest
+#endif  // USE_READ_BARRIER
+.endm
+
     /*
      * Entry from managed code for array put operations of objects where the value being stored
      * needs to be checked for compatibility.
@@ -912,14 +981,15 @@ END art_quick_aput_obj_with_bound_check
 ENTRY art_quick_aput_obj
     beq  $a2, $zero, .Ldo_aput_null
     nop
-    lwu $t0, MIRROR_OBJECT_CLASS_OFFSET($a0)
-    lwu $t1, MIRROR_OBJECT_CLASS_OFFSET($a2)
-    lwu $t0, MIRROR_CLASS_COMPONENT_TYPE_OFFSET($t0)
+    READ_BARRIER $t0, $a0, MIRROR_OBJECT_CLASS_OFFSET
+    READ_BARRIER $t1, $a2, MIRROR_OBJECT_CLASS_OFFSET
+    READ_BARRIER $t0, $t0, MIRROR_CLASS_COMPONENT_TYPE_OFFSET
     bne $t1, $t0, .Lcheck_assignability  # value's type == array's component type - trivial assignability
     nop
 .Ldo_aput:
     dsll  $a1, $a1, 2
     daddu $t0, $a0, $a1
+    POISON_HEAP_REF $a2
     sw   $a2, MIRROR_OBJECT_ARRAY_DATA_OFFSET($t0)
     ld   $t0, THREAD_CARD_TABLE_OFFSET(rSELF)
     dsrl  $t1, $a0, 7
@@ -1174,7 +1244,7 @@ END art_quick_set32_static
     .extern artSet64StaticFromCode
 ENTRY art_quick_set64_static
     SETUP_REFS_ONLY_CALLEE_SAVE_FRAME    # save callee saves in case of GC
-    move   $a2, $a1                      # pass new_val
+                                         # a2 contains the new val
     ld     $a1, FRAME_SIZE_REFS_ONLY_CALLEE_SAVE($sp)  # pass referrer's Method*
     jal    artSet64StaticFromCode        # (field_idx, referrer, new_val, Thread*)
     move   $a3, rSELF                    # pass Thread::Current
@@ -1366,14 +1436,8 @@ END art_quick_proxy_invoke_handler
      * dex method index.
      */
 ENTRY art_quick_imt_conflict_trampoline
-    ld      $a0, 0($sp)            # load caller Method*
-    lwu     $a0, ART_METHOD_DEX_CACHE_METHODS_OFFSET($a0)  # load dex_cache_resolved_methods
-    dsll    $t0, 3                 # convert target method offset to bytes
-    daddu   $a0, $t0               # get address of target method
-    dla     $t9, art_quick_invoke_interface_trampoline
-    .cpreturn
-    jalr    $zero, $t9
-    ld      $a0, MIRROR_LONG_ARRAY_DATA_OFFSET($a0)  # load the target method
+    move    $a0, $t0
+    INVOKE_TRAMPOLINE_BODY artInvokeInterfaceTrampoline
 END art_quick_imt_conflict_trampoline
 
     .extern artQuickResolutionTrampoline
@@ -1539,5 +1603,82 @@ ENTRY art_quick_deoptimize
     move     $a0, rSELF        # pass Thread::current
 END art_quick_deoptimize
 
-UNIMPLEMENTED art_quick_indexof
-UNIMPLEMENTED art_quick_string_compareto
+    /*
+     * Compiled code has requested that we deoptimize into the interpreter. The deoptimization
+     * will long jump to the upcall with a special exception of -1.
+     */
+    .extern artDeoptimizeFromCompiledCode
+ENTRY art_quick_deoptimize_from_compiled_code
+    SETUP_SAVE_ALL_CALLEE_SAVE_FRAME
+    jal      artDeoptimizeFromCompiledCode    # artDeoptimizeFromCompiledCode(Thread*, SP)
+                                              # Returns caller method's frame size.
+    move     $a0, rSELF                       # pass Thread::current
+END art_quick_deoptimize_from_compiled_code
+
+  .set push
+  .set noat
+/* java.lang.String.compareTo(String anotherString) */
+ENTRY_NO_GP art_quick_string_compareto
+/* $a0 holds address of "this" */
+/* $a1 holds address of "anotherString" */
+  beq    $a0,$a1,9f     # this and anotherString are the same object
+  move   $v0,$zero
+
+  lw     $a2,MIRROR_STRING_COUNT_OFFSET($a0)    # this.length()
+  lw     $a3,MIRROR_STRING_COUNT_OFFSET($a1)    # anotherString.length()
+  sltu   $at,$a2,$a3
+  seleqz $t2,$a3,$at
+  selnez $at,$a2,$at
+  or     $t2,$t2,$at    # $t2 now holds min(this.length(),anotherString.length())
+
+  beqz   $t2,9f         # while min(this.length(),anotherString.length())-i != 0
+  subu   $v0,$a2,$a3    # if $t2==0 return
+                        #     (this.length() - anotherString.length())
+1:
+  lhu    $t0,MIRROR_STRING_VALUE_OFFSET($a0)    # while this.charAt(i) == anotherString.charAt(i)
+  lhu    $t1,MIRROR_STRING_VALUE_OFFSET($a1)
+  bne    $t0,$t1,9f     # if this.charAt(i) != anotherString.charAt(i)
+  subu   $v0,$t0,$t1    #     return (this.charAt(i) - anotherString.charAt(i))
+  daddiu $a0,$a0,2      # point at this.charAt(i++)
+  subu   $t2,$t2,1      # new value of
+                        # min(this.length(),anotherString.length())-i
+  bnez   $t2,1b
+  daddiu $a1,$a1,2      # point at anotherString.charAt(i++)
+  subu   $v0,$a2,$a3
+
+9:
+  j      $ra
+  nop
+END art_quick_string_compareto
+
+/* java.lang.String.indexOf(int ch, int fromIndex=0) */
+ENTRY_NO_GP art_quick_indexof
+/* $a0 holds address of "this" */
+/* $a1 holds address of "ch" */
+/* $a2 holds address of "fromIndex" */
+  lw    $t0,MIRROR_STRING_COUNT_OFFSET($a0)     # this.length()
+  subu  $t0,$t0,$a2     # this.length() - offset
+  blez  $t0,6f          # if this.length()-offset <= 0
+  li    $v0,-1          #     return -1;
+
+  sll   $v0,$a2,1       # $a0 += $a2 * 2
+  daddu $a0,$a0,$v0     #  "  "   "  " "
+  move  $v0,$a2         # Set i to offset.
+
+1:
+  lhu   $t3,MIRROR_STRING_VALUE_OFFSET($a0)     # if this.charAt(i) == ch
+  beq   $t3,$a1,6f                              #     return i;
+  daddu $a0,$a0,2       # i++
+  subu  $t0,$t0,1       # this.length() - i
+  bnez  $t0,1b          # while this.length() - i > 0
+  addu  $v0,$v0,1       # i++
+
+  li    $v0,-1          # if this.length() - i <= 0
+                        #     return -1;
+
+6:
+  j     $ra
+  nop
+END art_quick_indexof
+
+  .set pop

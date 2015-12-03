@@ -43,12 +43,15 @@ Mutex* Locks::deoptimization_lock_ = nullptr;
 ReaderWriterMutex* Locks::heap_bitmap_lock_ = nullptr;
 Mutex* Locks::instrument_entrypoints_lock_ = nullptr;
 Mutex* Locks::intern_table_lock_ = nullptr;
+Mutex* Locks::interpreter_string_init_map_lock_ = nullptr;
 Mutex* Locks::jni_libraries_lock_ = nullptr;
 Mutex* Locks::logging_lock_ = nullptr;
 Mutex* Locks::mem_maps_lock_ = nullptr;
 Mutex* Locks::modify_ldt_lock_ = nullptr;
-ReaderWriterMutex* Locks::mutator_lock_ = nullptr;
+MutatorMutex* Locks::mutator_lock_ = nullptr;
 Mutex* Locks::profiler_lock_ = nullptr;
+ReaderWriterMutex* Locks::oat_file_manager_lock_ = nullptr;
+ReaderWriterMutex* Locks::oat_file_count_lock_ = nullptr;
 Mutex* Locks::reference_processor_lock_ = nullptr;
 Mutex* Locks::reference_queue_cleared_references_lock_ = nullptr;
 Mutex* Locks::reference_queue_finalizer_references_lock_ = nullptr;
@@ -61,6 +64,8 @@ ConditionVariable* Locks::thread_exit_cond_ = nullptr;
 Mutex* Locks::thread_suspend_count_lock_ = nullptr;
 Mutex* Locks::trace_lock_ = nullptr;
 Mutex* Locks::unexpected_signal_lock_ = nullptr;
+Mutex* Locks::lambda_table_lock_ = nullptr;
+Uninterruptible Roles::uninterruptible_;
 
 struct AllMutexData {
   // A guard for all_mutexes_ that's not a mutex (Mutexes must CAS to acquire and busy wait).
@@ -738,6 +743,11 @@ std::ostream& operator<<(std::ostream& os, const ReaderWriterMutex& mu) {
   return os;
 }
 
+std::ostream& operator<<(std::ostream& os, const MutatorMutex& mu) {
+  mu.Dump(os);
+  return os;
+}
+
 ConditionVariable::ConditionVariable(const char* name, Mutex& guard)
     : name_(name), guard_(guard) {
 #if ART_USE_FUTEXES
@@ -932,6 +942,8 @@ void Locks::Init() {
     DCHECK(classlinker_classes_lock_ != nullptr);
     DCHECK(deoptimization_lock_ != nullptr);
     DCHECK(heap_bitmap_lock_ != nullptr);
+    DCHECK(oat_file_manager_lock_ != nullptr);
+    DCHECK(oat_file_count_lock_ != nullptr);
     DCHECK(intern_table_lock_ != nullptr);
     DCHECK(jni_libraries_lock_ != nullptr);
     DCHECK(logging_lock_ != nullptr);
@@ -941,6 +953,7 @@ void Locks::Init() {
     DCHECK(thread_suspend_count_lock_ != nullptr);
     DCHECK(trace_lock_ != nullptr);
     DCHECK(unexpected_signal_lock_ != nullptr);
+    DCHECK(lambda_table_lock_ != nullptr);
   } else {
     // Create global locks in level order from highest lock level to lowest.
     LockLevel current_lock_level = kInstrumentEntrypointsLock;
@@ -958,7 +971,7 @@ void Locks::Init() {
 
     UPDATE_CURRENT_LOCK_LEVEL(kMutatorLock);
     DCHECK(mutator_lock_ == nullptr);
-    mutator_lock_ = new ReaderWriterMutex("mutator lock", current_lock_level);
+    mutator_lock_ = new MutatorMutex("mutator lock", current_lock_level);
 
     UPDATE_CURRENT_LOCK_LEVEL(kHeapBitmapLock);
     DCHECK(heap_bitmap_lock_ == nullptr);
@@ -983,6 +996,10 @@ void Locks::Init() {
     UPDATE_CURRENT_LOCK_LEVEL(kAllocTrackerLock);
     DCHECK(alloc_tracker_lock_ == nullptr);
     alloc_tracker_lock_ = new Mutex("AllocTracker lock", current_lock_level);
+
+    UPDATE_CURRENT_LOCK_LEVEL(kInterpreterStringInitMapLock);
+    DCHECK(interpreter_string_init_map_lock_ == nullptr);
+    interpreter_string_init_map_lock_ = new Mutex("Interpreter String initializer reference map lock", current_lock_level);
 
     UPDATE_CURRENT_LOCK_LEVEL(kThreadListLock);
     DCHECK(thread_list_lock_ == nullptr);
@@ -1015,6 +1032,14 @@ void Locks::Init() {
       modify_ldt_lock_ = new Mutex("modify_ldt lock", current_lock_level);
     }
 
+    UPDATE_CURRENT_LOCK_LEVEL(kOatFileManagerLock);
+    DCHECK(oat_file_manager_lock_ == nullptr);
+    oat_file_manager_lock_ = new ReaderWriterMutex("OatFile manager lock", current_lock_level);
+
+    UPDATE_CURRENT_LOCK_LEVEL(kOatFileCountLock);
+    DCHECK(oat_file_count_lock_ == nullptr);
+    oat_file_count_lock_ = new ReaderWriterMutex("OatFile count lock", current_lock_level);
+
     UPDATE_CURRENT_LOCK_LEVEL(kInternTableLock);
     DCHECK(intern_table_lock_ == nullptr);
     intern_table_lock_ = new Mutex("InternTable lock", current_lock_level);
@@ -1042,6 +1067,10 @@ void Locks::Init() {
     UPDATE_CURRENT_LOCK_LEVEL(kReferenceQueueSoftReferencesLock);
     DCHECK(reference_queue_soft_references_lock_ == nullptr);
     reference_queue_soft_references_lock_ = new Mutex("ReferenceQueue soft references lock", current_lock_level);
+
+    UPDATE_CURRENT_LOCK_LEVEL(kLambdaTableLock);
+    DCHECK(lambda_table_lock_ == nullptr);
+    lambda_table_lock_ = new Mutex("lambda table lock", current_lock_level);
 
     UPDATE_CURRENT_LOCK_LEVEL(kAbortLock);
     DCHECK(abort_lock_ == nullptr);

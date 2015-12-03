@@ -25,14 +25,14 @@ namespace art {
  * Create a simple control-flow graph composed of two blocks:
  *
  *   BasicBlock 0, succ: 1
- *     0: Goto 1
+ *     0: ReturnVoid 1
  *   BasicBlock 1, pred: 0
  *     1: Exit
  */
 HGraph* CreateSimpleCFG(ArenaAllocator* allocator) {
   HGraph* graph = CreateGraph(allocator);
   HBasicBlock* entry_block = new (allocator) HBasicBlock(graph);
-  entry_block->AddInstruction(new (allocator) HGoto());
+  entry_block->AddInstruction(new (allocator) HReturnVoid());
   graph->AddBlock(entry_block);
   graph->SetEntryBlock(entry_block);
   HBasicBlock* exit_block = new (allocator) HBasicBlock(graph);
@@ -50,7 +50,7 @@ static void TestCode(const uint16_t* data) {
   HGraph* graph = CreateCFG(&allocator, data);
   ASSERT_NE(graph, nullptr);
 
-  GraphChecker graph_checker(&allocator, graph);
+  GraphChecker graph_checker(graph);
   graph_checker.Run();
   ASSERT_TRUE(graph_checker.IsValid());
 }
@@ -64,7 +64,7 @@ static void TestCodeSSA(const uint16_t* data) {
   graph->BuildDominatorTree();
   graph->TransformToSsa();
 
-  SSAChecker ssa_checker(&allocator, graph);
+  SSAChecker ssa_checker(graph);
   ssa_checker.Run();
   ASSERT_TRUE(ssa_checker.IsValid());
 }
@@ -112,7 +112,7 @@ TEST(GraphChecker, InconsistentPredecessorsAndSuccessors) {
   ArenaAllocator allocator(&pool);
 
   HGraph* graph = CreateSimpleCFG(&allocator);
-  GraphChecker graph_checker(&allocator, graph);
+  GraphChecker graph_checker(graph);
   graph_checker.Run();
   ASSERT_TRUE(graph_checker.IsValid());
 
@@ -130,7 +130,7 @@ TEST(GraphChecker, BlockEndingWithNonBranchInstruction) {
   ArenaAllocator allocator(&pool);
 
   HGraph* graph = CreateSimpleCFG(&allocator);
-  GraphChecker graph_checker(&allocator, graph);
+  GraphChecker graph_checker(graph);
   graph_checker.Run();
   ASSERT_TRUE(graph_checker.IsValid());
 

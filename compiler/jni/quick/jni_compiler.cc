@@ -67,6 +67,7 @@ CompiledMethod* ArtJniCompileMethodInternal(CompilerDriver* driver,
   const bool is_synchronized = (access_flags & kAccSynchronized) != 0;
   const char* shorty = dex_file.GetMethodShorty(dex_file.GetMethodId(method_idx));
   InstructionSet instruction_set = driver->GetInstructionSet();
+  const InstructionSetFeatures* instruction_set_features = driver->GetInstructionSetFeatures();
   const bool is_64_bit_target = Is64BitInstructionSet(instruction_set);
   // Calling conventions used to iterate over parameters to method
   std::unique_ptr<JniCallingConvention> main_jni_conv(
@@ -93,7 +94,7 @@ CompiledMethod* ArtJniCompileMethodInternal(CompilerDriver* driver,
       JniCallingConvention::Create(is_static, is_synchronized, jni_end_shorty, instruction_set));
 
   // Assembler that holds generated instructions
-  std::unique_ptr<Assembler> jni_asm(Assembler::Create(instruction_set));
+  std::unique_ptr<Assembler> jni_asm(Assembler::Create(instruction_set, instruction_set_features));
   jni_asm->cfi().SetEnabled(driver->GetCompilerOptions().GetGenerateDebugInfo());
 
   // Offsets into data structures
@@ -138,7 +139,7 @@ CompiledMethod* ArtJniCompileMethodInternal(CompilerDriver* driver,
     FrameOffset handle_scope_offset = main_jni_conv->CurrentParamHandleScopeEntryOffset();
     // Check handle scope offset is within frame
     CHECK_LT(handle_scope_offset.Uint32Value(), frame_size);
-    // Note this LoadRef() doesn't need heap poisoning since its from the ArtMethod.
+    // Note this LoadRef() doesn't need heap unpoisoning since it's from the ArtMethod.
     // Note this LoadRef() does not include read barrier. It will be handled below.
     __ LoadRef(main_jni_conv->InterproceduralScratchRegister(),
                mr_conv->MethodRegister(), ArtMethod::DeclaringClassOffset(), false);
@@ -474,7 +475,7 @@ CompiledMethod* ArtJniCompileMethodInternal(CompilerDriver* driver,
   DCHECK_EQ(jni_asm->cfi().GetCurrentCFAOffset(), static_cast<int>(frame_size));
 
   // 17. Finalize code generation
-  __ EmitSlowPaths();
+  __ FinalizeCode();
   size_t cs = __ CodeSize();
   std::vector<uint8_t> managed_code(cs);
   MemoryRegion code(&managed_code[0], managed_code.size());
@@ -486,7 +487,7 @@ CompiledMethod* ArtJniCompileMethodInternal(CompilerDriver* driver,
                                                  frame_size,
                                                  main_jni_conv->CoreSpillMask(),
                                                  main_jni_conv->FpSpillMask(),
-                                                 nullptr,  // src_mapping_table.
+                                                 ArrayRef<const SrcMapElem>(),
                                                  ArrayRef<const uint8_t>(),  // mapping_table.
                                                  ArrayRef<const uint8_t>(),  // vmap_table.
                                                  ArrayRef<const uint8_t>(),  // native_gc_map.

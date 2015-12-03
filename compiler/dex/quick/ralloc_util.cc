@@ -18,6 +18,7 @@
 
 #include "mir_to_lir-inl.h"
 
+#include "base/stringprintf.h"
 #include "dex/compiler_ir.h"
 #include "dex/dataflow_iterator-inl.h"
 #include "dex/mir_graph.h"
@@ -320,15 +321,13 @@ RegStorage Mir2Lir::AllocPreservedFpReg(int s_reg) {
 }
 
 // TODO: this is Thumb2 only.  Remove when DoPromotion refactored.
-RegStorage Mir2Lir::AllocPreservedDouble(int s_reg) {
-  UNUSED(s_reg);
+RegStorage Mir2Lir::AllocPreservedDouble(int s_reg ATTRIBUTE_UNUSED) {
   UNIMPLEMENTED(FATAL) << "Unexpected use of AllocPreservedDouble";
   UNREACHABLE();
 }
 
 // TODO: this is Thumb2 only.  Remove when DoPromotion refactored.
-RegStorage Mir2Lir::AllocPreservedSingle(int s_reg) {
-  UNUSED(s_reg);
+RegStorage Mir2Lir::AllocPreservedSingle(int s_reg ATTRIBUTE_UNUSED) {
   UNIMPLEMENTED(FATAL) << "Unexpected use of AllocPreservedSingle";
   UNREACHABLE();
 }
@@ -1571,8 +1570,7 @@ int Mir2Lir::GetSRegHi(int lowSreg) {
   return (lowSreg == INVALID_SREG) ? INVALID_SREG : lowSreg + 1;
 }
 
-bool Mir2Lir::LiveOut(int s_reg) {
-  UNUSED(s_reg);
+bool Mir2Lir::LiveOut(int s_reg ATTRIBUTE_UNUSED) {
   // For now.
   return true;
 }

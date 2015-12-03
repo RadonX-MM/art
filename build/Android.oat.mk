@@ -23,15 +23,21 @@
 
 include art/build/Android.common_build.mk
 
+LOCAL_DEX2OAT_HOST_INSTRUCTION_SET_FEATURES_OPTION :=
 ifeq ($(DEX2OAT_HOST_INSTRUCTION_SET_FEATURES),)
-  DEX2OAT_HOST_INSTRUCTION_SET_FEATURES := default
+  LOCAL_DEX2OAT_HOST_INSTRUCTION_SET_FEATURES_OPTION := --instruction-set-features=default
+else
+  LOCAL_DEX2OAT_HOST_INSTRUCTION_SET_FEATURES_OPTION := --instruction-set-features=$(DEX2OAT_HOST_INSTRUCTION_SET_FEATURES)
 endif
+LOCAL_$(HOST_2ND_ARCH_VAR_PREFIX)DEX2OAT_HOST_INSTRUCTION_SET_FEATURES_OPTION :=
 ifeq ($($(HOST_2ND_ARCH_VAR_PREFIX)DEX2OAT_HOST_INSTRUCTION_SET_FEATURES),)
-  $(HOST_2ND_ARCH_VAR_PREFIX)DEX2OAT_HOST_INSTRUCTION_SET_FEATURES := default
+  LOCAL_$(HOST_2ND_ARCH_VAR_PREFIX)DEX2OAT_HOST_INSTRUCTION_SET_FEATURES_OPTION := --instruction-set-features=default
+else
+  LOCAL_$(HOST_2ND_ARCH_VAR_PREFIX)DEX2OAT_HOST_INSTRUCTION_SET_FEATURES_OPTION := --instruction-set-features=$($(HOST_2ND_ARCH_VAR_PREFIX)DEX2OAT_HOST_INSTRUCTION_SET_FEATURES)
 endif
 
 # Use dex2oat debug version for better error reporting
-# $(1): compiler - default, optimizing, jit or interpreter.
+# $(1): compiler - default, optimizing, jit, interpreter or interpreter-access-checks.
 # $(2): pic/no-pic
 # $(3): 2ND_ or undefined, 2ND_ for 32-bit host builds.
 # $(4): wrapper, e.g., valgrind.
@@ -46,12 +52,6 @@ define create-core-oat-host-rules
   core_pic_infix :=
   core_dex2oat_dependency := $(DEX2OAT_DEPENDENCY)
 
-  # With the optimizing compiler, we want to rerun dex2oat whenever there is
-  # a dex2oat change to catch regressions early.
-  ifeq ($(ART_USE_OPTIMIZING_COMPILER), true)
-    core_dex2oat_dependency := $(DEX2OAT)
-  endif
-
   ifeq ($(1),default)
     core_compile_options += --compiler-backend=Quick
   endif
@@ -64,12 +64,20 @@ define create-core-oat-host-rules
     core_compile_options += --compiler-filter=interpret-only
     core_infix := -interpreter
   endif
+  ifeq ($(1),interp-ac)
+    core_compile_options += --compiler-filter=verify-at-runtime --runtime-arg -Xverify:softfail
+    core_infix := -interp-ac
+  endif
+  ifeq ($(1),jit)
+    core_compile_options += --compiler-filter=verify-at-runtime
+    core_infix := -jit
+  endif
   ifeq ($(1),default)
     # Default has no infix, no compile options.
   endif
-  ifneq ($(filter-out default interpreter jit optimizing,$(1)),)
+  ifneq ($(filter-out default interpreter interp-ac jit optimizing,$(1)),)
     #Technically this test is not precise, but hopefully good enough.
-    $$(error found $(1) expected default, interpreter, jit or optimizing)
+    $$(error found $(1) expected default, interpreter, interpreter-access-checks, jit or optimizing)
   endif
 
   ifeq ($(2),pic)
@@ -112,7 +120,7 @@ $$(core_image_name): $$(HOST_CORE_DEX_LOCATIONS) $$(core_dex2oat_dependency)
 	  $$(addprefix --dex-location=,$$(HOST_CORE_DEX_LOCATIONS)) --oat-file=$$(PRIVATE_CORE_OAT_NAME) \
 	  --oat-location=$$(PRIVATE_CORE_OAT_NAME) --image=$$(PRIVATE_CORE_IMG_NAME) \
 	  --base=$$(LIBART_IMG_HOST_BASE_ADDRESS) --instruction-set=$$($(3)ART_HOST_ARCH) \
-	  --instruction-set-features=$$($(3)DEX2OAT_HOST_INSTRUCTION_SET_FEATURES) \
+	  $$(LOCAL_$(3)DEX2OAT_HOST_INSTRUCTION_SET_FEATURES_OPTION) \
 	  --host --android-root=$$(HOST_OUT) --include-patch-information --generate-debug-info \
 	  $$(PRIVATE_CORE_COMPILE_OPTIONS)
 
@@ -127,7 +135,7 @@ $$(core_oat_name): $$(core_image_name)
   core_pic_infix :=
 endef  # create-core-oat-host-rules
 
-# $(1): compiler - default, optimizing, jit or interpreter.
+# $(1): compiler - default, optimizing, jit, interpreter or interpreter-access-checks.
 # $(2): wrapper.
 # $(3): dex2oat suffix.
 define create-core-oat-host-rule-combination
@@ -143,12 +151,16 @@ endef
 $(eval $(call create-core-oat-host-rule-combination,default,,))
 $(eval $(call create-core-oat-host-rule-combination,optimizing,,))
 $(eval $(call create-core-oat-host-rule-combination,interpreter,,))
+$(eval $(call create-core-oat-host-rule-combination,interp-ac,,))
+$(eval $(call create-core-oat-host-rule-combination,jit,,))
 
 valgrindHOST_CORE_IMG_OUTS :=
 valgrindHOST_CORE_OAT_OUTS :=
 $(eval $(call create-core-oat-host-rule-combination,default,valgrind,32))
 $(eval $(call create-core-oat-host-rule-combination,optimizing,valgrind,32))
 $(eval $(call create-core-oat-host-rule-combination,interpreter,valgrind,32))
+$(eval $(call create-core-oat-host-rule-combination,interp-ac,valgrind,32))
+$(eval $(call create-core-oat-host-rule-combination,jit,valgrind,32))
 
 valgrind-test-art-host-dex2oat-host: $(valgrindHOST_CORE_IMG_OUTS)
 
@@ -160,17 +172,13 @@ define create-core-oat-target-rules
   core_pic_infix :=
   core_dex2oat_dependency := $(DEX2OAT_DEPENDENCY)
 
-  # With the optimizing compiler, we want to rerun dex2oat whenever there is
-  # a dex2oat change to catch regressions early.
-  ifeq ($(ART_USE_OPTIMIZING_COMPILER), true)
-    core_dex2oat_dependency := $(DEX2OAT)
-  endif
-
   ifeq ($(1),default)
     core_compile_options += --compiler-backend=Quick
   endif
   ifeq ($(1),optimizing)
     core_compile_options += --compiler-backend=Optimizing
+    # With the optimizing compiler, we want to rerun dex2oat whenever there is
+    # a dex2oat change to catch regressions early.
     core_dex2oat_dependency := $(DEX2OAT)
     core_infix := -optimizing
   endif
@@ -178,12 +186,20 @@ define create-core-oat-target-rules
     core_compile_options += --compiler-filter=interpret-only
     core_infix := -interpreter
   endif
+  ifeq ($(1),interp-ac)
+    core_compile_options += --compiler-filter=verify-at-runtime --runtime-arg -Xverify:softfail
+    core_infix := -interp-ac
+  endif
+  ifeq ($(1),jit)
+    core_compile_options += --compiler-filter=verify-at-runtime
+    core_infix := -jit
+  endif
   ifeq ($(1),default)
     # Default has no infix, no compile options.
   endif
-  ifneq ($(filter-out default interpreter jit optimizing,$(1)),)
+  ifneq ($(filter-out default interpreter interp-ac jit optimizing,$(1)),)
     # Technically this test is not precise, but hopefully good enough.
-    $$(error found $(1) expected default, interpreter, jit or optimizing)
+    $$(error found $(1) expected default, interpreter, interpreter-access-checks, jit or optimizing)
   endif
 
   ifeq ($(2),pic)
@@ -246,7 +262,7 @@ $$(core_oat_name): $$(core_image_name)
   core_pic_infix :=
 endef  # create-core-oat-target-rules
 
-# $(1): compiler - default, optimizing, jit or interpreter.
+# $(1): compiler - default, optimizing, jit, interpreter or interpreter-access-checks.
 # $(2): wrapper.
 # $(3): dex2oat suffix.
 define create-core-oat-target-rule-combination
@@ -262,12 +278,16 @@ endef
 $(eval $(call create-core-oat-target-rule-combination,default,,))
 $(eval $(call create-core-oat-target-rule-combination,optimizing,,))
 $(eval $(call create-core-oat-target-rule-combination,interpreter,,))
+$(eval $(call create-core-oat-target-rule-combination,interp-ac,,))
+$(eval $(call create-core-oat-target-rule-combination,jit,,))
 
 valgrindTARGET_CORE_IMG_OUTS :=
 valgrindTARGET_CORE_OAT_OUTS :=
 $(eval $(call create-core-oat-target-rule-combination,default,valgrind,32))
 $(eval $(call create-core-oat-target-rule-combination,optimizing,valgrind,32))
 $(eval $(call create-core-oat-target-rule-combination,interpreter,valgrind,32))
+$(eval $(call create-core-oat-target-rule-combination,interp-ac,valgrind,32))
+$(eval $(call create-core-oat-target-rule-combination,jit,valgrind,32))
 
 valgrind-test-art-host-dex2oat-target: $(valgrindTARGET_CORE_IMG_OUTS)
 

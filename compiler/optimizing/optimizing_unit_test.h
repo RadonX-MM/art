@@ -60,10 +60,8 @@ LiveInterval* BuildInterval(const size_t ranges[][2],
 }
 
 void RemoveSuspendChecks(HGraph* graph) {
-  for (size_t i = 0, e = graph->GetBlocks().Size(); i < e; ++i) {
-    for (HInstructionIterator it(graph->GetBlocks().Get(i)->GetInstructions());
-         !it.Done();
-         it.Advance()) {
+  for (HBasicBlock* block : graph->GetBlocks()) {
+    for (HInstructionIterator it(block->GetInstructions()); !it.Done(); it.Advance()) {
       HInstruction* current = it.Current();
       if (current->IsSuspendCheck()) {
         current->GetBlock()->RemoveInstruction(current);
@@ -74,8 +72,8 @@ void RemoveSuspendChecks(HGraph* graph) {
 
 inline HGraph* CreateGraph(ArenaAllocator* allocator) {
   return new (allocator) HGraph(
-      allocator, *reinterpret_cast<DexFile*>(allocator->Alloc(sizeof(DexFile))), -1, kRuntimeISA,
-      false);
+      allocator, *reinterpret_cast<DexFile*>(allocator->Alloc(sizeof(DexFile))), -1, false,
+      kRuntimeISA);
 }
 
 // Create a control-flow graph from Dex instructions.

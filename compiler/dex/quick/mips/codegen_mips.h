@@ -29,15 +29,18 @@ class MipsMir2Lir FINAL : public Mir2Lir {
  protected:
   class InToRegStorageMipsMapper : public InToRegStorageMapper {
    public:
-    explicit InToRegStorageMipsMapper(Mir2Lir* m2l) : m2l_(m2l), cur_core_reg_(0) {}
+    explicit InToRegStorageMipsMapper(Mir2Lir* m2l) : m2l_(m2l), cur_core_reg_(0), cur_fpu_reg_(0)
+        {}
     virtual RegStorage GetNextReg(ShortyArg arg);
     virtual void Reset() OVERRIDE {
       cur_core_reg_ = 0;
+      cur_fpu_reg_ = 0;
     }
    protected:
     Mir2Lir* m2l_;
    private:
     size_t cur_core_reg_;
+    size_t cur_fpu_reg_;
   };
 
   class InToRegStorageMips64Mapper : public InToRegStorageMapper {
@@ -266,6 +269,11 @@ class MipsMir2Lir FINAL : public Mir2Lir {
   const bool fpuIs32Bit_;
 
  private:
+  static int MipsNextSDCallInsn(CompilationUnit* cu, CallInfo* info, int state,
+                                const MethodReference& target_method, uint32_t,
+                                uintptr_t direct_code, uintptr_t direct_method,
+                                InvokeType type);
+
   void GenNegLong(RegLocation rl_dest, RegLocation rl_src);
   void GenAddLong(RegLocation rl_dest, RegLocation rl_src1, RegLocation rl_src2);
   void GenSubLong(RegLocation rl_dest, RegLocation rl_src1, RegLocation rl_src2);

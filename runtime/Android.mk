@@ -25,6 +25,7 @@ LIBART_COMMON_SRC_FILES := \
   barrier.cc \
   base/allocator.cc \
   base/arena_allocator.cc \
+  base/arena_bit_vector.cc \
   base/bit_vector.cc \
   base/hex_dump.cc \
   base/logging.cc \
@@ -39,12 +40,15 @@ LIBART_COMMON_SRC_FILES := \
   base/unix_file/random_access_file_utils.cc \
   check_jni.cc \
   class_linker.cc \
+  class_table.cc \
   common_throws.cc \
   debugger.cc \
   dex_file.cc \
   dex_file_verifier.cc \
   dex_instruction.cc \
   elf_file.cc \
+  fault_handler.cc \
+  gc/allocation_record.cc \
   gc/allocator/dlmalloc.cc \
   gc/allocator/rosalloc.cc \
   gc/accounting/bitmap.cc \
@@ -56,6 +60,7 @@ LIBART_COMMON_SRC_FILES := \
   gc/collector/concurrent_copying.cc \
   gc/collector/garbage_collector.cc \
   gc/collector/immune_region.cc \
+  gc/collector/immune_spaces.cc \
   gc/collector/mark_compact.cc \
   gc/collector/mark_sweep.cc \
   gc/collector/partial_mark_sweep.cc \
@@ -65,6 +70,7 @@ LIBART_COMMON_SRC_FILES := \
   gc/heap.cc \
   gc/reference_processor.cc \
   gc/reference_queue.cc \
+  gc/scoped_gc_critical_section.cc \
   gc/space/bump_pointer_space.cc \
   gc/space/dlmalloc_space.cc \
   gc/space/image_space.cc \
@@ -97,6 +103,13 @@ LIBART_COMMON_SRC_FILES := \
   jit/jit.cc \
   jit/jit_code_cache.cc \
   jit/jit_instrumentation.cc \
+  jit/offline_profiling_info.cc \
+  jit/profiling_info.cc \
+  lambda/art_lambda_method.cc \
+  lambda/box_table.cc \
+  lambda/closure.cc \
+  lambda/closure_builder.cc \
+  lambda/leaking_allocator.cc \
   jni_internal.cc \
   jobject_comparator.cc \
   linear_alloc.cc \
@@ -145,11 +158,14 @@ LIBART_COMMON_SRC_FILES := \
   oat.cc \
   oat_file.cc \
   oat_file_assistant.cc \
+  oat_file_manager.cc \
+  oat_quick_method_header.cc \
   object_lock.cc \
   offsets.cc \
   os_linux.cc \
   parsed_options.cc \
   primitive.cc \
+  profiler.cc \
   quick_exception_handler.cc \
   quick/inline_method_analyser.cc \
   reference_table.cc \
@@ -164,8 +180,7 @@ LIBART_COMMON_SRC_FILES := \
   thread_pool.cc \
   trace.cc \
   transaction.cc \
-  profiler.cc \
-  fault_handler.cc \
+  type_lookup_table.cc \
   utf.cc \
   utils.cc \
   verifier/dex_gc_map.cc \
@@ -194,7 +209,6 @@ LIBART_COMMON_SRC_FILES += \
   arch/x86/registers_x86.cc \
   arch/x86_64/registers_x86_64.cc \
   entrypoints/entrypoint_utils.cc \
-  entrypoints/interpreter/interpreter_entrypoints.cc \
   entrypoints/jni/jni_entrypoints.cc \
   entrypoints/math_entrypoints.cc \
   entrypoints/quick/quick_alloc_entrypoints.cc \
@@ -310,13 +324,14 @@ LIBART_ENUM_OPERATOR_OUT_HEADER_FILES := \
   dex_instruction.h \
   dex_instruction_utils.h \
   gc_root.h \
-  gc/allocator/rosalloc.h \
-  gc/collector/gc_type.h \
   gc/allocator_type.h \
+  gc/allocator/rosalloc.h \
   gc/collector_type.h \
+  gc/collector/gc_type.h \
+  gc/heap.h \
   gc/space/region_space.h \
   gc/space/space.h \
-  gc/heap.h \
+  gc/weak_root_state.h \
   image.h \
   instrumentation.h \
   indirect_reference_table.h \
@@ -337,10 +352,13 @@ LIBART_ENUM_OPERATOR_OUT_HEADER_FILES := \
 
 LIBART_CFLAGS := -DBUILDING_LIBART=1
 
+LIBART_TARGET_CFLAGS :=
+LIBART_HOST_CFLAGS :=
+
 ifeq ($(MALLOC_IMPL),dlmalloc)
-  LIBART_CFLAGS += -DUSE_DLMALLOC
+  LIBART_TARGET_CFLAGS += -DUSE_DLMALLOC
 else
-  LIBART_CFLAGS += -DUSE_JEMALLOC
+  LIBART_TARGET_CFLAGS += -DUSE_JEMALLOC
 endif
 
 # Default dex2oat instruction set features.
@@ -368,6 +386,7 @@ endif
 
 # $(1): target or host
 # $(2): ndebug or debug
+# $(3): static or shared (empty means shared, applies only for host)
 define build-libart
   ifneq ($(1),target)
     ifneq ($(1),host)
@@ -382,15 +401,9 @@ define build-libart
 
   art_target_or_host := $(1)
   art_ndebug_or_debug := $(2)
+  art_static_or_shared := $(3)
 
   include $$(CLEAR_VARS)
-  # Clang assembler has problem with macros in asm_support_x86.S, http://b/17443165,
-  # on linux. Yet sdk on mac needs integrated assembler.
-  ifeq ($$(HOST_OS),darwin)
-    LOCAL_CLANG_ASFLAGS += -integrated-as
-  else
-    LOCAL_CLANG_ASFLAGS += -no-integrated-as
-  endif
   LOCAL_CPP_EXTENSION := $$(ART_CPP_EXTENSION)
   ifeq ($$(art_ndebug_or_debug),ndebug)
     LOCAL_MODULE := libart
@@ -402,7 +415,12 @@ define build-libart
   endif
 
   LOCAL_MODULE_TAGS := optional
-  LOCAL_MODULE_CLASS := SHARED_LIBRARIES
+
+  ifeq ($$(art_static_or_shared),static)
+    LOCAL_MODULE_CLASS := STATIC_LIBRARIES
+  else
+    LOCAL_MODULE_CLASS := SHARED_LIBRARIES
+  endif
 
   ifeq ($$(art_target_or_host),target)
     LOCAL_SRC_FILES := $$(LIBART_TARGET_SRC_FILES)
@@ -429,9 +447,14 @@ $$(ENUM_OPERATOR_OUT_GEN): $$(GENERATED_SRC_DIR)/%_operator_out.cc : $(LOCAL_PAT
   LOCAL_CFLAGS := $$(LIBART_CFLAGS)
   LOCAL_LDFLAGS := $$(LIBART_LDFLAGS)
   ifeq ($$(art_target_or_host),target)
+    LOCAL_CFLAGS += $$(LIBART_TARGET_CFLAGS)
     LOCAL_LDFLAGS += $$(LIBART_TARGET_LDFLAGS)
-  else
+  else #host
+    LOCAL_CFLAGS += $$(LIBART_HOST_CFLAGS)
     LOCAL_LDFLAGS += $$(LIBART_HOST_LDFLAGS)
+    ifeq ($$(art_static_or_shared),static)
+      LOCAL_LDFLAGS += -static
+    endif
   endif
   $$(foreach arch,$$(ART_TARGET_SUPPORTED_ARCH), \
     $$(eval LOCAL_LDFLAGS_$$(arch) := $$(LIBART_TARGET_LDFLAGS_$$(arch))))
@@ -451,6 +474,7 @@ $$(ENUM_OPERATOR_OUT_GEN): $$(GENERATED_SRC_DIR)/%_operator_out.cc : $(LOCAL_PAT
     endif
     LOCAL_CFLAGS += $$(ART_HOST_CFLAGS)
     LOCAL_CFLAGS += -DART_DEFAULT_INSTRUCTION_SET_FEATURES="$(LIBART_HOST_DEFAULT_INSTRUCTION_SET_FEATURES)"
+    LOCAL_ASFLAGS += $$(ART_HOST_ASFLAGS)
 
     ifeq ($$(art_ndebug_or_debug),debug)
       LOCAL_CFLAGS += $$(ART_HOST_DEBUG_CFLAGS)
@@ -465,8 +489,12 @@ $$(ENUM_OPERATOR_OUT_GEN): $$(GENERATED_SRC_DIR)/%_operator_out.cc : $(LOCAL_PAT
   LOCAL_C_INCLUDES += art/sigchainlib
   LOCAL_C_INCLUDES += art
 
-  LOCAL_SHARED_LIBRARIES := libnativehelper libnativebridge libsigchain
-  LOCAL_SHARED_LIBRARIES += libbacktrace
+  ifeq ($$(art_static_or_shared),static)
+    LOCAL_STATIC_LIBRARIES := libnativehelper libnativebridge libsigchain_dummy libbacktrace
+  else
+    LOCAL_SHARED_LIBRARIES := libnativehelper libnativebridge libsigchain libbacktrace
+  endif
+
   ifeq ($$(art_target_or_host),target)
     LOCAL_SHARED_LIBRARIES += libdl
     # ZipArchive support, the order matters here to get all symbols.
@@ -479,9 +507,15 @@ $$(ENUM_OPERATOR_OUT_GEN): $$(GENERATED_SRC_DIR)/%_operator_out.cc : $(LOCAL_PAT
       LOCAL_WHOLE_STATIC_LIBRARIES += libqc-art
     endif
   else # host
-    LOCAL_SHARED_LIBRARIES += libziparchive-host
-    # For ashmem_create_region.
-    LOCAL_SHARED_LIBRARIES += libcutils
+    ifeq ($$(art_static_or_shared),static)
+      LOCAL_STATIC_LIBRARIES += libziparchive-host libz
+      # For ashmem_create_region.
+      LOCAL_STATIC_LIBRARIES += libcutils
+    else
+      LOCAL_SHARED_LIBRARIES += libziparchive-host libz-host
+      # For ashmem_create_region.
+      LOCAL_SHARED_LIBRARIES += libcutils
+    endif
   endif
   LOCAL_ADDITIONAL_DEPENDENCIES := art/build/Android.common_build.mk
   LOCAL_ADDITIONAL_DEPENDENCIES += $$(LOCAL_PATH)/Android.mk
@@ -500,7 +534,11 @@ $$(ENUM_OPERATOR_OUT_GEN): $$(GENERATED_SRC_DIR)/%_operator_out.cc : $(LOCAL_PAT
     endif
     include $$(BUILD_SHARED_LIBRARY)
   else # host
-    include $$(BUILD_HOST_SHARED_LIBRARY)
+    ifeq ($$(art_static_or_shared),static)
+      include $$(BUILD_HOST_STATIC_LIBRARY)
+    else
+      include $$(BUILD_HOST_SHARED_LIBRARY)
+    endif
   endif
 
   # Clear locally defined variables.
@@ -509,15 +547,22 @@ $$(ENUM_OPERATOR_OUT_GEN): $$(GENERATED_SRC_DIR)/%_operator_out.cc : $(LOCAL_PAT
   ENUM_OPERATOR_OUT_GEN :=
   art_target_or_host :=
   art_ndebug_or_debug :=
+  art_static_or_shared :=
 endef
 
 # We always build dex2oat and dependencies, even if the host build is otherwise disabled, since
 # they are used to cross compile for the target.
 ifeq ($(ART_BUILD_HOST_NDEBUG),true)
   $(eval $(call build-libart,host,ndebug))
+  ifeq ($(ART_BUILD_HOST_STATIC),true)
+    $(eval $(call build-libart,host,ndebug,static))
+  endif
 endif
 ifeq ($(ART_BUILD_HOST_DEBUG),true)
   $(eval $(call build-libart,host,debug))
+  ifeq ($(ART_BUILD_HOST_STATIC),true)
+    $(eval $(call build-libart,host,debug,static))
+  endif
 endif
 
 ifeq ($(ART_BUILD_TARGET_NDEBUG),true)
@@ -548,4 +593,6 @@ LIBART_HOST_SRC_FILES_32 :=
 LIBART_HOST_SRC_FILES_64 :=
 LIBART_ENUM_OPERATOR_OUT_HEADER_FILES :=
 LIBART_CFLAGS :=
+LIBART_TARGET_CFLAGS :=
+LIBART_HOST_CFLAGS :=
 build-libart :=

@@ -82,6 +82,7 @@ std::vector<uint8_t> Thumb2RelativePatcher::CompileThunkCode() {
       arm::kLoadWord, arm::PC, arm::R0,
       ArtMethod::EntryPointFromQuickCompiledCodeOffset(kArmPointerSize).Int32Value());
   assembler.bkpt(0);
+  assembler.FinalizeCode();
   std::vector<uint8_t> thunk_code(assembler.CodeSize());
   MemoryRegion code(thunk_code.data(), thunk_code.size());
   assembler.FinalizeInstructions(code);
@@ -109,8 +110,9 @@ uint32_t Thumb2RelativePatcher::GetInsn32(ArrayRef<const uint8_t> code, uint32_t
       (static_cast<uint32_t>(addr[3]) << 8);
 }
 
-template <typename Alloc>
-uint32_t Thumb2RelativePatcher::GetInsn32(std::vector<uint8_t, Alloc>* code, uint32_t offset) {
+template <typename Vector>
+uint32_t Thumb2RelativePatcher::GetInsn32(Vector* code, uint32_t offset) {
+  static_assert(std::is_same<typename Vector::value_type, uint8_t>::value, "Invalid value type");
   return GetInsn32(ArrayRef<const uint8_t>(*code), offset);
 }
 

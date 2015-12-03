@@ -1,3 +1,4 @@
 JIT_ART
 *~
 *.save*
+**/__pycache__/**

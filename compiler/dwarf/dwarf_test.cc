@@ -27,7 +27,7 @@ namespace art {
 namespace dwarf {
 
 // Run the tests only on host since we need objdump.
-#ifndef HAVE_ANDROID_OS
+#ifndef __ANDROID__
 
 constexpr CFIFormat kCFIFormat = DW_DEBUG_FRAME_FORMAT;
 
@@ -122,12 +122,12 @@ TEST_F(DwarfTest, DebugFrame) {
   DW_CHECK_NEXT("DW_CFA_restore: r5 (ebp)");
 
   DebugFrameOpCodeWriter<> initial_opcodes;
-  WriteDebugFrameCIE(is64bit, DW_EH_PE_absptr, Reg(is64bit ? 16 : 8),
-                     initial_opcodes, kCFIFormat, &debug_frame_data_);
+  WriteCIE(is64bit, Reg(is64bit ? 16 : 8),
+           initial_opcodes, kCFIFormat, &debug_frame_data_);
   std::vector<uintptr_t> debug_frame_patches;
   std::vector<uintptr_t> expected_patches { 28 };  // NOLINT
-  WriteDebugFrameFDE(is64bit, 0, 0x01000000, 0x01000000, opcodes.data(),
-                     kCFIFormat, &debug_frame_data_, &debug_frame_patches);
+  WriteFDE(is64bit, 0, 0, 0x01000000, 0x01000000, ArrayRef<const uint8_t>(*opcodes.data()),
+           kCFIFormat, 0, &debug_frame_data_, &debug_frame_patches);
 
   EXPECT_EQ(expected_patches, debug_frame_patches);
   CheckObjdumpOutput(is64bit, "-W");
@@ -136,13 +136,14 @@ TEST_F(DwarfTest, DebugFrame) {
 TEST_F(DwarfTest, DebugFrame64) {
   constexpr bool is64bit = true;
   DebugFrameOpCodeWriter<> initial_opcodes;
-  WriteDebugFrameCIE(is64bit, DW_EH_PE_absptr, Reg(16),
-                     initial_opcodes, kCFIFormat, &debug_frame_data_);
+  WriteCIE(is64bit, Reg(16),
+           initial_opcodes, kCFIFormat, &debug_frame_data_);
   DebugFrameOpCodeWriter<> opcodes;
   std::vector<uintptr_t> debug_frame_patches;
   std::vector<uintptr_t> expected_patches { 32 };  // NOLINT
-  WriteDebugFrameFDE(is64bit, 0, 0x0100000000000000, 0x0200000000000000,
-                     opcodes.data(), kCFIFormat, &debug_frame_data_, &debug_frame_patches);
+  WriteFDE(is64bit, 0, 0, 0x0100000000000000, 0x0200000000000000,
+           ArrayRef<const uint8_t>(*opcodes.data()),
+                     kCFIFormat, 0, &debug_frame_data_, &debug_frame_patches);
   DW_CHECK("FDE cie=00000000 pc=100000000000000..300000000000000");
 
   EXPECT_EQ(expected_patches, debug_frame_patches);
@@ -175,11 +176,12 @@ TEST_F(DwarfTest, x86_64_RegisterMapping) {
   DW_CHECK_NEXT("DW_CFA_offset: r14 (r14)");
   DW_CHECK_NEXT("DW_CFA_offset: r15 (r15)");
   DebugFrameOpCodeWriter<> initial_opcodes;
-  WriteDebugFrameCIE(is64bit, DW_EH_PE_absptr, Reg(16),
-                     initial_opcodes, kCFIFormat, &debug_frame_data_);
+  WriteCIE(is64bit, Reg(16),
+           initial_opcodes, kCFIFormat, &debug_frame_data_);
   std::vector<uintptr_t> debug_frame_patches;
-  WriteDebugFrameFDE(is64bit, 0, 0x0100000000000000, 0x0200000000000000,
-                     opcodes.data(), kCFIFormat, &debug_frame_data_, &debug_frame_patches);
+  WriteFDE(is64bit, 0, 0, 0x0100000000000000, 0x0200000000000000,
+           ArrayRef<const uint8_t>(*opcodes.data()),
+                     kCFIFormat, 0, &debug_frame_data_, &debug_frame_patches);
 
   CheckObjdumpOutput(is64bit, "-W");
 }
@@ -235,7 +237,7 @@ TEST_F(DwarfTest, DebugLine) {
   std::vector<uintptr_t> debug_line_patches;
   std::vector<uintptr_t> expected_patches { 87 };  // NOLINT
   WriteDebugLineTable(include_directories, files, opcodes,
-                      &debug_line_data_, &debug_line_patches);
+                      0, &debug_line_data_, &debug_line_patches);
 
   EXPECT_EQ(expected_patches, debug_line_patches);
   CheckObjdumpOutput(is64bit, "-W");
@@ -274,7 +276,7 @@ TEST_F(DwarfTest, DebugLineSpecialOpcodes) {
   std::vector<FileEntry> files { { "file.c", 0, 1000, 2000 } };  // NOLINT
   std::vector<uintptr_t> debug_line_patches;
   WriteDebugLineTable(directories, files, opcodes,
-                      &debug_line_data_, &debug_line_patches);
+                      0, &debug_line_data_, &debug_line_patches);
 
   CheckObjdumpOutput(is64bit, "-W -WL");
 }
@@ -283,7 +285,7 @@ TEST_F(DwarfTest, DebugInfo) {
   constexpr bool is64bit = false;
   DebugInfoEntryWriter<> info(is64bit, &debug_abbrev_data_);
   DW_CHECK("Contents of the .debug_info section:");
-  info.StartTag(dwarf::DW_TAG_compile_unit, dwarf::DW_CHILDREN_yes);
+  info.StartTag(dwarf::DW_TAG_compile_unit);
   DW_CHECK("Abbrev Number: 1 (DW_TAG_compile_unit)");
   info.WriteStrp(dwarf::DW_AT_producer, "Compiler name", &debug_str_data_);
   DW_CHECK_NEXT("DW_AT_producer    : (indirect string, offset: 0x0): Compiler name");
@@ -291,7 +293,7 @@ TEST_F(DwarfTest, DebugInfo) {
   DW_CHECK_NEXT("DW_AT_low_pc      : 0x1000000");
   info.WriteAddr(dwarf::DW_AT_high_pc, 0x02000000);
   DW_CHECK_NEXT("DW_AT_high_pc     : 0x2000000");
-  info.StartTag(dwarf::DW_TAG_subprogram, dwarf::DW_CHILDREN_no);
+  info.StartTag(dwarf::DW_TAG_subprogram);
   DW_CHECK("Abbrev Number: 2 (DW_TAG_subprogram)");
   info.WriteStrp(dwarf::DW_AT_name, "Foo", &debug_str_data_);
   DW_CHECK_NEXT("DW_AT_name        : (indirect string, offset: 0xe): Foo");
@@ -300,7 +302,7 @@ TEST_F(DwarfTest, DebugInfo) {
   info.WriteAddr(dwarf::DW_AT_high_pc, 0x01020000);
   DW_CHECK_NEXT("DW_AT_high_pc     : 0x1020000");
   info.EndTag();  // DW_TAG_subprogram
-  info.StartTag(dwarf::DW_TAG_subprogram, dwarf::DW_CHILDREN_no);
+  info.StartTag(dwarf::DW_TAG_subprogram);
   DW_CHECK("Abbrev Number: 2 (DW_TAG_subprogram)");
   info.WriteStrp(dwarf::DW_AT_name, "Bar", &debug_str_data_);
   DW_CHECK_NEXT("DW_AT_name        : (indirect string, offset: 0x12): Bar");
@@ -311,7 +313,7 @@ TEST_F(DwarfTest, DebugInfo) {
   info.EndTag();  // DW_TAG_subprogram
   info.EndTag();  // DW_TAG_compile_unit
   // Test that previous list was properly terminated and empty children.
-  info.StartTag(dwarf::DW_TAG_compile_unit, dwarf::DW_CHILDREN_yes);
+  info.StartTag(dwarf::DW_TAG_compile_unit);
   info.EndTag();  // DW_TAG_compile_unit
 
   // The abbrev table is just side product, but check it as well.
@@ -325,18 +327,18 @@ TEST_F(DwarfTest, DebugInfo) {
   DW_CHECK_NEXT("DW_AT_name         DW_FORM_strp");
   DW_CHECK_NEXT("DW_AT_low_pc       DW_FORM_addr");
   DW_CHECK_NEXT("DW_AT_high_pc      DW_FORM_addr");
-  DW_CHECK("3      DW_TAG_compile_unit    [has children]");
+  DW_CHECK("3      DW_TAG_compile_unit    [no children]");
 
   std::vector<uintptr_t> debug_info_patches;
   std::vector<uintptr_t> expected_patches { 16, 20, 29, 33, 42, 46 };  // NOLINT
   dwarf::WriteDebugInfoCU(0 /* debug_abbrev_offset */, info,
-                          &debug_info_data_, &debug_info_patches);
+                          0, &debug_info_data_, &debug_info_patches);
 
   EXPECT_EQ(expected_patches, debug_info_patches);
   CheckObjdumpOutput(is64bit, "-W");
 }
 
-#endif  // HAVE_ANDROID_OS
+#endif  // __ANDROID__
 
 }  // namespace dwarf
 }  // namespace art

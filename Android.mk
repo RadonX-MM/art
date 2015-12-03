@@ -33,7 +33,7 @@ endif
 
 # Don't bother with tests unless there is a test-art*, build-art*, or related target.
 art_test_bother := false
-ifneq (,$(filter %tests test-art% valgrind-test-art% build-art%,$(MAKECMDGOALS)))
+ifneq (,$(filter tests test-art% valgrind-test-art% build-art% checkbuild,$(MAKECMDGOALS)))
   art_test_bother := true
 endif
 
@@ -78,6 +78,8 @@ include $(art_path)/build/Android.cpplint.mk
 
 include $(art_path)/runtime/Android.mk
 include $(art_path)/compiler/Android.mk
+include $(art_path)/dexdump/Android.mk
+include $(art_path)/dexlist/Android.mk
 include $(art_path)/dex2oat/Android.mk
 include $(art_path)/disassembler/Android.mk
 include $(art_path)/oatdump/Android.mk
@@ -85,6 +87,7 @@ include $(art_path)/imgdiag/Android.mk
 include $(art_path)/patchoat/Android.mk
 include $(art_path)/dalvikvm/Android.mk
 include $(art_path)/tools/Android.mk
+include $(art_path)/tools/ahat/Android.mk
 include $(art_path)/tools/dexfuzz/Android.mk
 include $(art_path)/tools/dmtracedump/Android.mk
 include $(art_path)/sigchainlib/Android.mk
@@ -117,23 +120,35 @@ TEST_ART_TARGET_SYNC_DEPS :=
 include $(art_path)/build/Android.common_test.mk
 include $(art_path)/build/Android.gtest.mk
 include $(art_path)/test/Android.run-test.mk
+include $(art_path)/benchmark/Android.mk
+
+TEST_ART_ADB_ROOT_AND_REMOUNT := \
+    (adb root && \
+     adb wait-for-device remount && \
+     ((adb shell touch /system/testfile && \
+       (adb shell rm /system/testfile || true)) || \
+      (adb disable-verity && \
+       adb reboot && \
+       adb wait-for-device root && \
+       adb wait-for-device remount)))
 
 # Sync test files to the target, depends upon all things that must be pushed to the target.
 .PHONY: test-art-target-sync
+# Check if we need to sync. In case ART_TEST_ANDROID_ROOT is not empty,
+# the code below uses 'adb push' instead of 'adb sync', which does not
+# check if the files on the device have changed.
+ifneq ($(ART_TEST_NO_SYNC),true)
 ifeq ($(ART_TEST_ANDROID_ROOT),)
 test-art-target-sync: $(TEST_ART_TARGET_SYNC_DEPS)
-	adb root
-	adb wait-for-device remount
+	$(TEST_ART_ADB_ROOT_AND_REMOUNT)
 	adb sync
 else
 test-art-target-sync: $(TEST_ART_TARGET_SYNC_DEPS)
-	adb root
+	$(TEST_ART_ADB_ROOT_AND_REMOUNT)
 	adb wait-for-device push $(ANDROID_PRODUCT_OUT)/system $(ART_TEST_ANDROID_ROOT)
 	adb push $(ANDROID_PRODUCT_OUT)/data /data
 endif
-
-# Undefine variable now its served its purpose.
-TEST_ART_TARGET_SYNC_DEPS :=
+endif
 
 # "mm test-art" to build and run all tests on host and device
 .PHONY: test-art
@@ -165,7 +180,8 @@ test-art-host-vixl: $(VIXL_TEST_DEPENDENCY)
 
 # "mm test-art-host" to build and run all host tests.
 .PHONY: test-art-host
-test-art-host: test-art-host-gtest test-art-host-run-test test-art-host-vixl
+test-art-host: test-art-host-gtest test-art-host-run-test \
+               test-art-host-vixl test-art-host-dexdump
 	$(hide) $(call ART_TEST_PREREQ_FINISHED,$@)
 
 # All host tests that run solely with the default compiler.
@@ -233,6 +249,11 @@ test-art-host-interpreter$(2ND_ART_PHONY_TEST_HOST_SUFFIX): test-art-host-run-te
 test-art-host-jit$(2ND_ART_PHONY_TEST_HOST_SUFFIX): test-art-host-run-test-jit$(2ND_ART_PHONY_TEST_HOST_SUFFIX)
 	$(hide) $(call ART_TEST_PREREQ_FINISHED,$@)
 endif
+
+# Dexdump/list regression test.
+.PHONY: test-art-host-dexdump
+test-art-host-dexdump: $(addprefix $(HOST_OUT_EXECUTABLES)/, dexdump2 dexlist)
+	ANDROID_HOST_OUT=$(realpath $(HOST_OUT)) art/test/dexdump/run-all-tests
 
 # Valgrind. Currently only 32b gtests.
 .PHONY: valgrind-test-art-host
@@ -362,8 +383,7 @@ oat-target: $(ART_TARGET_DEPENDENCIES) $(DEFAULT_DEX_PREOPT_INSTALLED_IMAGE) $(O
 
 .PHONY: oat-target-sync
 oat-target-sync: oat-target
-	adb root
-	adb wait-for-device remount
+	$(TEST_ART_ADB_ROOT_AND_REMOUNT)
 	adb sync
 
 ########################################################################
@@ -376,6 +396,15 @@ build-art-host:   $(HOST_OUT_EXECUTABLES)/art $(ART_HOST_DEPENDENCIES) $(HOST_CO
 
 .PHONY: build-art-target
 build-art-target: $(TARGET_OUT_EXECUTABLES)/art $(ART_TARGET_DEPENDENCIES) $(TARGET_CORE_IMG_OUTS)
+
+########################################################################
+# Rules for building all dependencies for tests.
+
+.PHONY: build-art-host-tests
+build-art-host-tests:   build-art-host $(TEST_ART_RUN_TEST_DEPENDENCIES) $(ART_TEST_HOST_RUN_TEST_DEPENDENCIES) $(ART_TEST_HOST_GTEST_DEPENDENCIES)
+
+.PHONY: build-art-target-tests
+build-art-target-tests:   build-art-target $(TEST_ART_RUN_TEST_DEPENDENCIES) $(TEST_ART_TARGET_SYNC_DEPS)
 
 ########################################################################
 # targets to switch back and forth from libdvm to libart
@@ -409,6 +438,7 @@ use-art-full:
 	adb shell setprop dalvik.vm.dex2oat-filter \"\"
 	adb shell setprop dalvik.vm.image-dex2oat-filter \"\"
 	adb shell setprop persist.sys.dalvik.vm.lib.2 libart.so
+	adb shell setprop dalvik.vm.usejit false
 	adb shell start
 
 .PHONY: use-artd-full
@@ -419,16 +449,18 @@ use-artd-full:
 	adb shell setprop dalvik.vm.dex2oat-filter \"\"
 	adb shell setprop dalvik.vm.image-dex2oat-filter \"\"
 	adb shell setprop persist.sys.dalvik.vm.lib.2 libartd.so
+	adb shell setprop dalvik.vm.usejit false
 	adb shell start
 
-.PHONY: use-art-verify-at-runtime
-use-art-verify-at-runtime:
+.PHONY: use-art-jit
+use-art-jit:
 	adb root
 	adb wait-for-device shell stop
 	adb shell rm -rf $(ART_TARGET_DALVIK_CACHE_DIR)/*
 	adb shell setprop dalvik.vm.dex2oat-filter "verify-at-runtime"
 	adb shell setprop dalvik.vm.image-dex2oat-filter "verify-at-runtime"
 	adb shell setprop persist.sys.dalvik.vm.lib.2 libart.so
+	adb shell setprop dalvik.vm.usejit true
 	adb shell start
 
 .PHONY: use-art-interpret-only
@@ -439,6 +471,7 @@ use-art-interpret-only:
 	adb shell setprop dalvik.vm.dex2oat-filter "interpret-only"
 	adb shell setprop dalvik.vm.image-dex2oat-filter "interpret-only"
 	adb shell setprop persist.sys.dalvik.vm.lib.2 libart.so
+	adb shell setprop dalvik.vm.usejit false
 	adb shell start
 
 .PHONY: use-artd-interpret-only
@@ -449,6 +482,7 @@ use-artd-interpret-only:
 	adb shell setprop dalvik.vm.dex2oat-filter "interpret-only"
 	adb shell setprop dalvik.vm.image-dex2oat-filter "interpret-only"
 	adb shell setprop persist.sys.dalvik.vm.lib.2 libartd.so
+	adb shell setprop dalvik.vm.usejit false
 	adb shell start
 
 .PHONY: use-art-verify-none
@@ -459,6 +493,7 @@ use-art-verify-none:
 	adb shell setprop dalvik.vm.dex2oat-filter "verify-none"
 	adb shell setprop dalvik.vm.image-dex2oat-filter "verify-none"
 	adb shell setprop persist.sys.dalvik.vm.lib.2 libart.so
+	adb shell setprop dalvik.vm.usejit false
 	adb shell start
 
 ########################################################################
@@ -468,3 +503,4 @@ endif # !art_dont_bother
 # Clear locally used variables.
 art_dont_bother :=
 art_test_bother :=
+TEST_ART_TARGET_SYNC_DEPS :=

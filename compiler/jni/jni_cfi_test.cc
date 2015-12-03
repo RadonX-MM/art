@@ -28,7 +28,7 @@
 namespace art {
 
 // Run the tests only on host.
-#ifndef HAVE_ANDROID_OS
+#ifndef __ANDROID__
 
 class JNICFITest : public CFITest {
  public:
@@ -51,12 +51,13 @@ class JNICFITest : public CFITest {
 
     // Assemble the method.
     std::unique_ptr<Assembler> jni_asm(Assembler::Create(isa));
+    jni_asm->cfi().SetEnabled(true);
     jni_asm->BuildFrame(frame_size, mr_conv->MethodRegister(),
                         callee_save_regs, mr_conv->EntrySpills());
     jni_asm->IncreaseFrameSize(32);
     jni_asm->DecreaseFrameSize(32);
     jni_asm->RemoveFrame(frame_size, callee_save_regs);
-    jni_asm->EmitSlowPaths();
+    jni_asm->FinalizeCode();
     std::vector<uint8_t> actual_asm(jni_asm->CodeSize());
     MemoryRegion code(&actual_asm[0], actual_asm.size());
     jni_asm->FinalizeInstructions(code);
@@ -88,6 +89,6 @@ TEST_ISA(kX86_64)
 TEST_ISA(kMips)
 TEST_ISA(kMips64)
 
-#endif  // HAVE_ANDROID_OS
+#endif  // __ANDROID__
 
 }  // namespace art

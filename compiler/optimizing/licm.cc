@@ -80,7 +80,7 @@ static void UpdateLoopPhisIn(HEnvironment* environment, HLoopInformation* info) 
 void LICM::Run() {
   DCHECK(side_effects_.HasRun());
   // Only used during debug.
-  ArenaBitVector visited(graph_->GetArena(), graph_->GetBlocks().Size(), false);
+  ArenaBitVector visited(graph_->GetArena(), graph_->GetBlocks().size(), false);
 
   // Post order visit to visit inner loops before outer loops.
   for (HPostOrderIterator it(*graph_); !it.Done(); it.Advance()) {
@@ -115,7 +115,7 @@ void LICM::Run() {
         HInstruction* instruction = inst_it.Current();
         if (instruction->CanBeMoved()
             && (!instruction->CanThrow() || !found_first_non_hoisted_throwing_instruction_in_loop)
-            && !instruction->GetSideEffects().DependsOn(loop_effects)
+            && !instruction->GetSideEffects().MayDependOn(loop_effects)
             && InputsAreDefinedBeforeLoop(instruction)) {
           // We need to update the environment if the instruction has a loop header
           // phi in it.

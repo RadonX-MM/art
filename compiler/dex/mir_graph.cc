@@ -179,7 +179,7 @@ int MIRGraph::ParseInsn(const uint16_t* code_ptr, MIR::DecodedInstruction* decod
   decoded_instruction->vB = inst->HasVRegB() ? inst->VRegB() : 0;
   decoded_instruction->vB_wide = inst->HasWideVRegB() ? inst->WideVRegB() : 0;
   decoded_instruction->vC = inst->HasVRegC() ?  inst->VRegC() : 0;
-  if (inst->HasVarArgs()) {
+  if (inst->HasVarArgs35c()) {
     inst->GetVarArgs(decoded_instruction->arg);
   }
   return inst->SizeInCodeUnits();
@@ -517,9 +517,8 @@ BasicBlock* MIRGraph::ProcessCanBranch(BasicBlock* cur_block, MIR* insn, DexOffs
 
 /* Process instructions with the kSwitch flag */
 BasicBlock* MIRGraph::ProcessCanSwitch(BasicBlock* cur_block, MIR* insn, DexOffset cur_offset,
-                                       int width, int flags,
+                                       int width, int flags ATTRIBUTE_UNUSED,
                                        ScopedArenaVector<uint16_t>* dex_pc_to_block_map) {
-  UNUSED(flags);
   const uint16_t* switch_data =
       reinterpret_cast<const uint16_t*>(GetCurrentInsns() + cur_offset +
           static_cast<int32_t>(insn->dalvikInsn.vB));
@@ -578,7 +577,7 @@ BasicBlock* MIRGraph::ProcessCanSwitch(BasicBlock* cur_block, MIR* insn, DexOffs
     DCHECK(case_block != nullptr);
     SuccessorBlockInfo* successor_block_info =
         static_cast<SuccessorBlockInfo*>(arena_->Alloc(sizeof(SuccessorBlockInfo),
-                                                       kArenaAllocSuccessor));
+                                                       kArenaAllocSuccessors));
     successor_block_info->block = case_block->id;
     successor_block_info->key =
         (insn->dalvikInsn.opcode == Instruction::PACKED_SWITCH) ?
@@ -598,11 +597,15 @@ BasicBlock* MIRGraph::ProcessCanSwitch(BasicBlock* cur_block, MIR* insn, DexOffs
 }
 
 /* Process instructions with the kThrow flag */
-BasicBlock* MIRGraph::ProcessCanThrow(BasicBlock* cur_block, MIR* insn, DexOffset cur_offset,
-                                      int width, int flags, ArenaBitVector* try_block_addr,
-                                      const uint16_t* code_ptr, const uint16_t* code_end,
+BasicBlock* MIRGraph::ProcessCanThrow(BasicBlock* cur_block,
+                                      MIR* insn,
+                                      DexOffset cur_offset,
+                                      int width,
+                                      int flags ATTRIBUTE_UNUSED,
+                                      ArenaBitVector* try_block_addr,
+                                      const uint16_t* code_ptr,
+                                      const uint16_t* code_end,
                                       ScopedArenaVector<uint16_t>* dex_pc_to_block_map) {
-  UNUSED(flags);
   bool in_try_block = try_block_addr->IsBitSet(cur_offset);
   bool is_throw = (insn->dalvikInsn.opcode == Instruction::THROW);
 
@@ -633,7 +636,7 @@ BasicBlock* MIRGraph::ProcessCanThrow(BasicBlock* cur_block, MIR* insn, DexOffse
         catches_.insert(catch_block->start_offset);
       }
       SuccessorBlockInfo* successor_block_info = reinterpret_cast<SuccessorBlockInfo*>
-          (arena_->Alloc(sizeof(SuccessorBlockInfo), kArenaAllocSuccessor));
+          (arena_->Alloc(sizeof(SuccessorBlockInfo), kArenaAllocSuccessors));
       successor_block_info->block = catch_block->id;
       successor_block_info->key = iterator.GetHandlerTypeIndex();
       cur_block->successor_blocks.push_back(successor_block_info);
@@ -705,16 +708,17 @@ BasicBlock* MIRGraph::ProcessCanThrow(BasicBlock* cur_block, MIR* insn, DexOffse
 /* Parse a Dex method and insert it into the MIRGraph at the current insert point. */
 void MIRGraph::InlineMethod(const DexFile::CodeItem* code_item, uint32_t access_flags,
                            InvokeType invoke_type ATTRIBUTE_UNUSED, uint16_t class_def_idx,
-                           uint32_t method_idx, jobject class_loader, const DexFile& dex_file) {
+                           uint32_t method_idx, jobject class_loader, const DexFile& dex_file,
+                           Handle<mirror::DexCache> dex_cache) {
   current_code_item_ = code_item;
   method_stack_.push_back(std::make_pair(current_method_, current_offset_));
   current_method_ = m_units_.size();
   current_offset_ = 0;
   // TODO: will need to snapshot stack image and use that as the mir context identification.
   m_units_.push_back(new (arena_) DexCompilationUnit(
-      cu_, class_loader, Runtime::Current()->GetClassLinker(), dex_file,
-      current_code_item_, class_def_idx, method_idx, access_flags,
-      cu_->compiler_driver->GetVerifiedMethod(&dex_file, method_idx)));
+      cu_, class_loader, Runtime::Current()->GetClassLinker(), dex_file, current_code_item_,
+      class_def_idx, method_idx, access_flags,
+      cu_->compiler_driver->GetVerifiedMethod(&dex_file, method_idx), dex_cache));
   const uint16_t* code_ptr = current_code_item_->insns_;
   const uint16_t* code_end =
       current_code_item_->insns_ + current_code_item_->insns_size_in_code_units_;
@@ -2188,7 +2192,7 @@ BasicBlock* BasicBlock::Copy(MIRGraph* mir_graph) {
     result_bb->successor_blocks.reserve(successor_blocks.size());
     for (SuccessorBlockInfo* sbi_old : successor_blocks) {
       SuccessorBlockInfo* sbi_new = static_cast<SuccessorBlockInfo*>(
-          arena->Alloc(sizeof(SuccessorBlockInfo), kArenaAllocSuccessor));
+          arena->Alloc(sizeof(SuccessorBlockInfo), kArenaAllocSuccessors));
       memcpy(sbi_new, sbi_old, sizeof(SuccessorBlockInfo));
       result_bb->successor_blocks.push_back(sbi_new);
     }

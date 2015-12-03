@@ -36,13 +36,12 @@ class QuickTrampolineEntrypointsTest : public CommonRuntimeTest {
     Runtime* r = Runtime::Current();
 
     Thread* t = Thread::Current();
-    t->TransitionFromSuspendedToRunnable();  // So we can create callee-save methods.
+
+    ScopedObjectAccess soa(t);
 
     r->SetInstructionSet(isa);
     ArtMethod* save_method = r->CreateCalleeSaveMethod();
     r->SetCalleeSaveMethod(save_method, type);
-
-    t->TransitionFromRunnableToSuspended(ThreadState::kNative);  // So we can shut down.
 
     return save_method;
   }
@@ -50,7 +49,7 @@ class QuickTrampolineEntrypointsTest : public CommonRuntimeTest {
   static void CheckFrameSize(InstructionSet isa, Runtime::CalleeSaveType type, uint32_t save_size)
       NO_THREAD_SAFETY_ANALYSIS {
     ArtMethod* save_method = CreateCalleeSaveMethod(isa, type);
-    QuickMethodFrameInfo frame_info = save_method->GetQuickFrameInfo();
+    QuickMethodFrameInfo frame_info = Runtime::Current()->GetRuntimeMethodFrameInfo(save_method);
     EXPECT_EQ(frame_info.FrameSizeInBytes(), save_size) << "Expected and real size differs for "
         << type << " core spills=" << std::hex << frame_info.CoreSpillMask() << " fp spills="
         << frame_info.FpSpillMask() << std::dec << " ISA " << isa;
@@ -59,8 +58,8 @@ class QuickTrampolineEntrypointsTest : public CommonRuntimeTest {
   static void CheckPCOffset(InstructionSet isa, Runtime::CalleeSaveType type, size_t pc_offset)
       NO_THREAD_SAFETY_ANALYSIS {
     ArtMethod* save_method = CreateCalleeSaveMethod(isa, type);
-    QuickMethodFrameInfo frame_info = save_method->GetQuickFrameInfo();
-    EXPECT_EQ(save_method->GetReturnPcOffset().SizeValue(), pc_offset)
+    QuickMethodFrameInfo frame_info = Runtime::Current()->GetRuntimeMethodFrameInfo(save_method);
+    EXPECT_EQ(frame_info.GetReturnPcOffset(), pc_offset)
         << "Expected and real pc offset differs for " << type
         << " core spills=" << std::hex << frame_info.CoreSpillMask()
         << " fp spills=" << frame_info.FpSpillMask() << std::dec << " ISA " << isa;

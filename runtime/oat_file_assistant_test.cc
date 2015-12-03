@@ -31,6 +31,7 @@
 #include "compiler_callbacks.h"
 #include "gc/space/image_space.h"
 #include "mem_map.h"
+#include "oat_file_manager.h"
 #include "os.h"
 #include "scoped_thread_state_change.h"
 #include "thread-inl.h"
@@ -184,37 +185,77 @@ class OatFileAssistantTest : public CommonRuntimeTest {
     return odex_dir_;
   }
 
-  // Generate an odex file for the purposes of test.
-  // If pic is true, generates a PIC odex.
+  // Generate a non-PIC odex file for the purposes of test.
+  // The generated odex file will be un-relocated.
   void GenerateOdexForTest(const std::string& dex_location,
-                           const std::string& odex_location,
-                           bool pic = false) {
-    // For this operation, we temporarily redirect the dalvik cache so dex2oat
-    // doesn't find the relocated image file.
+                           const std::string& odex_location) {
+    // To generate an un-relocated odex file, we first compile a relocated
+    // version of the file, then manually call patchoat to make it look as if
+    // it is unrelocated.
+    std::string relocated_odex_location = odex_location + ".relocated";
+    std::vector<std::string> args;
+    args.push_back("--dex-file=" + dex_location);
+    args.push_back("--oat-file=" + relocated_odex_location);
+    args.push_back("--include-patch-information");
+
+    // We need to use the quick compiler to generate non-PIC code, because
+    // the optimizing compiler always generates PIC.
+    args.push_back("--compiler-backend=Quick");
+
+    std::string error_msg;
+    ASSERT_TRUE(OatFileAssistant::Dex2Oat(args, &error_msg)) << error_msg;
+
+    // Use patchoat to unrelocate the relocated odex file.
+    Runtime* runtime = Runtime::Current();
+    std::vector<std::string> argv;
+    argv.push_back(runtime->GetPatchoatExecutable());
+    argv.push_back("--instruction-set=" + std::string(GetInstructionSetString(kRuntimeISA)));
+    argv.push_back("--input-oat-file=" + relocated_odex_location);
+    argv.push_back("--output-oat-file=" + odex_location);
+    argv.push_back("--base-offset-delta=0x00008000");
+    std::string command_line(Join(argv, ' '));
+    ASSERT_TRUE(Exec(argv, &error_msg)) << error_msg;
+
+    // Verify the odex file was generated as expected and really is
+    // unrelocated.
+    std::unique_ptr<OatFile> odex_file(OatFile::Open(
+        odex_location.c_str(), odex_location.c_str(), nullptr, nullptr,
+        false, dex_location.c_str(), &error_msg));
+    ASSERT_TRUE(odex_file.get() != nullptr) << error_msg;
+
+    const gc::space::ImageSpace* image_space = runtime->GetHeap()->GetBootImageSpace();
+    ASSERT_TRUE(image_space != nullptr);
+    const ImageHeader& image_header = image_space->GetImageHeader();
+    const OatHeader& oat_header = odex_file->GetOatHeader();
+    EXPECT_FALSE(odex_file->IsPic());
+    EXPECT_EQ(image_header.GetOatChecksum(), oat_header.GetImageFileLocationOatChecksum());
+    EXPECT_NE(reinterpret_cast<uintptr_t>(image_header.GetOatDataBegin()),
+        oat_header.GetImageFileLocationOatDataBegin());
+    EXPECT_NE(image_header.GetPatchDelta(), oat_header.GetImagePatchDelta());
+  }
+
+  void GeneratePicOdexForTest(const std::string& dex_location,
+                              const std::string& odex_location) {
+    // Temporarily redirect the dalvik cache so dex2oat doesn't find the
+    // relocated image file.
     std::string android_data_tmp = GetScratchDir() + "AndroidDataTmp";
     setenv("ANDROID_DATA", android_data_tmp.c_str(), 1);
     std::vector<std::string> args;
     args.push_back("--dex-file=" + dex_location);
     args.push_back("--oat-file=" + odex_location);
-    if (pic) {
-      args.push_back("--compile-pic");
-    } else {
-      args.push_back("--include-patch-information");
-
-      // We need to use the quick compiler to generate non-PIC code, because
-      // the optimizing compiler always generates PIC.
-      args.push_back("--compiler-backend=Quick");
-    }
+    args.push_back("--compile-pic");
     args.push_back("--runtime-arg");
     args.push_back("-Xnorelocate");
     std::string error_msg;
     ASSERT_TRUE(OatFileAssistant::Dex2Oat(args, &error_msg)) << error_msg;
     setenv("ANDROID_DATA", android_data_.c_str(), 1);
-  }
 
-  void GeneratePicOdexForTest(const std::string& dex_location,
-                              const std::string& odex_location) {
-    GenerateOdexForTest(dex_location, odex_location, true);
+    // Verify the odex file was generated as expected.
+    std::unique_ptr<OatFile> odex_file(OatFile::Open(
+        odex_location.c_str(), odex_location.c_str(), nullptr, nullptr,
+        false, dex_location.c_str(), &error_msg));
+    ASSERT_TRUE(odex_file.get() != nullptr) << error_msg;
+    EXPECT_TRUE(odex_file->IsPic());
   }
 
  private:
@@ -470,6 +511,10 @@ TEST_F(OatFileAssistantTest, DexOdexNoOat) {
   EXPECT_TRUE(oat_file_assistant.OatFileIsOutOfDate());
   EXPECT_FALSE(oat_file_assistant.OatFileIsUpToDate());
   EXPECT_TRUE(oat_file_assistant.HasOriginalDexFiles());
+
+  // We should still be able to get the non-executable odex file to run from.
+  std::unique_ptr<OatFile> oat_file = oat_file_assistant.GetBestOatFile();
+  ASSERT_TRUE(oat_file.get() != nullptr);
 }
 
 // Case: We have a stripped DEX file and an ODEX file, but no OAT file.
@@ -711,18 +756,6 @@ TEST_F(OatFileAssistantTest, OdexOatOverlap) {
   std::vector<std::unique_ptr<const DexFile>> dex_files;
   dex_files = oat_file_assistant.LoadDexFiles(*oat_file, dex_location.c_str());
   EXPECT_EQ(1u, dex_files.size());
-
-  // Add some extra checks to help diagnose apparently flaky test failures.
-  Runtime* runtime = Runtime::Current();
-  const gc::space::ImageSpace* image_space = runtime->GetHeap()->GetImageSpace();
-  ASSERT_TRUE(image_space != nullptr);
-  const ImageHeader& image_header = image_space->GetImageHeader();
-  const OatHeader& oat_header = oat_file->GetOatHeader();
-  EXPECT_FALSE(oat_file->IsPic());
-  EXPECT_EQ(image_header.GetOatChecksum(), oat_header.GetImageFileLocationOatChecksum());
-  EXPECT_NE(reinterpret_cast<uintptr_t>(image_header.GetOatDataBegin()),
-      oat_header.GetImageFileLocationOatDataBegin());
-  EXPECT_NE(image_header.GetPatchDelta(), oat_header.GetImagePatchDelta());
 }
 
 // Case: We have a DEX file and a PIC ODEX file, but no OAT file.
@@ -814,6 +847,38 @@ TEST_F(OatFileAssistantTest, LoadDexNoAlternateOat) {
   // Verify it didn't create an oat in the default location.
   OatFileAssistant ofm(dex_location.c_str(), kRuntimeISA, false);
   EXPECT_FALSE(ofm.OatFileExists());
+}
+
+// Case: We have a DEX file but can't write the oat file.
+// Expect: We should fail to make the oat file up to date.
+TEST_F(OatFileAssistantTest, LoadDexUnwriteableAlternateOat) {
+  std::string dex_location = GetScratchDir() + "/LoadDexUnwriteableAlternateOat.jar";
+
+  // Make the oat location unwritable by inserting some non-existent
+  // intermediate directories.
+  std::string oat_location = GetScratchDir() + "/foo/bar/LoadDexUnwriteableAlternateOat.oat";
+
+  Copy(GetDexSrc1(), dex_location);
+
+  OatFileAssistant oat_file_assistant(
+      dex_location.c_str(), oat_location.c_str(), kRuntimeISA, true);
+  std::string error_msg;
+  ASSERT_FALSE(oat_file_assistant.MakeUpToDate(&error_msg));
+
+  std::unique_ptr<OatFile> oat_file = oat_file_assistant.GetBestOatFile();
+  ASSERT_TRUE(oat_file.get() == nullptr);
+}
+
+// Case: We don't have a DEX file and can't write the oat file.
+// Expect: We should fail to generate the oat file without crashing.
+TEST_F(OatFileAssistantTest, GenNoDex) {
+  std::string dex_location = GetScratchDir() + "/GenNoDex.jar";
+  std::string oat_location = GetScratchDir() + "/GenNoDex.oat";
+
+  OatFileAssistant oat_file_assistant(
+      dex_location.c_str(), oat_location.c_str(), kRuntimeISA, true);
+  std::string error_msg;
+  ASSERT_FALSE(oat_file_assistant.GenerateOatFile(&error_msg));
 }
 
 // Turn an absolute path into a path relative to the current working
@@ -921,18 +986,21 @@ class RaceGenerateTask : public Task {
       loaded_oat_file_(nullptr)
   {}
 
-  void Run(Thread* self) {
-    UNUSED(self);
-
+  void Run(Thread* self ATTRIBUTE_UNUSED) {
     // Load the dex files, and save a pointer to the loaded oat file, so that
     // we can verify only one oat file was loaded for the dex location.
-    ClassLinker* linker = Runtime::Current()->GetClassLinker();
     std::vector<std::unique_ptr<const DexFile>> dex_files;
     std::vector<std::string> error_msgs;
-    dex_files = linker->OpenDexFilesFromOat(dex_location_.c_str(), oat_location_.c_str(), &error_msgs);
+    const OatFile* oat_file = nullptr;
+    dex_files = Runtime::Current()->GetOatFileManager().OpenDexFilesFromOat(
+        dex_location_.c_str(),
+        oat_location_.c_str(),
+        &oat_file,
+        &error_msgs);
     CHECK(!dex_files.empty()) << Join(error_msgs, '\n');
     CHECK(dex_files[0]->GetOatDexFile() != nullptr) << dex_files[0]->GetLocation();
     loaded_oat_file_ = dex_files[0]->GetOatDexFile()->GetOatFile();
+    CHECK_EQ(loaded_oat_file_, oat_file);
   }
 
   const OatFile* GetLoadedOatFile() const {
@@ -948,8 +1016,9 @@ class RaceGenerateTask : public Task {
 // Test the case where multiple processes race to generate an oat file.
 // This simulates multiple processes using multiple threads.
 //
-// We want only one Oat file to be loaded when there is a race to load, to
-// avoid using up the virtual memory address space.
+// We want unique Oat files to be loaded even when there is a race to load.
+// TODO: The test case no longer tests locking the way it was intended since we now get multiple
+// copies of the same Oat files mapped at different locations.
 TEST_F(OatFileAssistantTest, RaceToGenerate) {
   std::string dex_location = GetScratchDir() + "/RaceToGenerate.jar";
   std::string oat_location = GetOdexDir() + "/RaceToGenerate.oat";
@@ -970,10 +1039,12 @@ TEST_F(OatFileAssistantTest, RaceToGenerate) {
   thread_pool.StartWorkers(self);
   thread_pool.Wait(self, true, false);
 
-  // Verify every task got the same pointer.
-  const OatFile* expected = tasks[0]->GetLoadedOatFile();
+  // Verify every task got a unique oat file.
+  std::set<const OatFile*> oat_files;
   for (auto& task : tasks) {
-    EXPECT_EQ(expected, task->GetLoadedOatFile());
+    const OatFile* oat_file = task->GetLoadedOatFile();
+    EXPECT_TRUE(oat_files.find(oat_file) == oat_files.end());
+    oat_files.insert(oat_file);
   }
 }
 

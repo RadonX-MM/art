@@ -16,16 +16,13 @@
 
 #include "mem_map.h"
 
+#include "base/memory_tool.h"
 #include <backtrace/BacktraceMap.h>
 #include <inttypes.h>
+#include <stdlib.h>
 
 #include <memory>
 #include <sstream>
-
-// See CreateStartPos below.
-#ifdef __BIONIC__
-#include <sys/auxv.h>
-#endif
 
 #include "base/stringprintf.h"
 
@@ -102,7 +99,7 @@ static constexpr uintptr_t LOW_MEM_START = 64 * KB;
 // --------------------------------------
 // start
 //
-// getauxval as an entropy source is exposed in Bionic, but not in glibc before 2.16. When we
+// arc4random as an entropy source is exposed in Bionic, but not in glibc. When we
 // do not have Bionic, simply start with LOW_MEM_START.
 
 // Function is standalone so it can be tested somewhat in mem_map_test.cc.
@@ -124,11 +121,11 @@ uintptr_t CreateStartPos(uint64_t input) {
 
 static uintptr_t GenerateNextMemPos() {
 #ifdef __BIONIC__
-  uint8_t* random_data = reinterpret_cast<uint8_t*>(getauxval(AT_RANDOM));
-  // The lower 8B are taken for the stack guard. Use the upper 8B (with mask).
-  return CreateStartPos(*reinterpret_cast<uintptr_t*>(random_data + 8));
+  uint64_t random_data;
+  arc4random_buf(&random_data, sizeof(random_data));
+  return CreateStartPos(random_data);
 #else
-  // No auxv on host, see above.
+  // No arc4random on host, see above.
   return LOW_MEM_START;
 #endif
 }
@@ -137,14 +134,30 @@ static uintptr_t GenerateNextMemPos() {
 uintptr_t MemMap::next_mem_pos_ = GenerateNextMemPos();
 #endif
 
-// Return true if the address range is contained in a single /proc/self/map entry.
-static bool ContainedWithinExistingMap(uint8_t* ptr, size_t size,
-                                       std::string* error_msg) {
+// Return true if the address range is contained in a single memory map by either reading
+// the maps_ variable or the /proc/self/map entry.
+bool MemMap::ContainedWithinExistingMap(uint8_t* ptr, size_t size, std::string* error_msg) {
   uintptr_t begin = reinterpret_cast<uintptr_t>(ptr);
   uintptr_t end = begin + size;
+
+  // There is a suspicion that BacktraceMap::Create is occasionally missing maps. TODO: Investigate
+  // further.
+  {
+    MutexLock mu(Thread::Current(), *Locks::mem_maps_lock_);
+    for (auto& pair : *maps_) {
+      MemMap* const map = pair.second;
+      if (begin >= reinterpret_cast<uintptr_t>(map->Begin()) &&
+          end <= reinterpret_cast<uintptr_t>(map->End())) {
+        return true;
+      }
+    }
+  }
+
   std::unique_ptr<BacktraceMap> map(BacktraceMap::Create(getpid(), true));
-  if (map.get() == nullptr) {
-    *error_msg = StringPrintf("Failed to build process map");
+  if (map == nullptr) {
+    if (error_msg != nullptr) {
+      *error_msg = StringPrintf("Failed to build process map");
+    }
     return false;
   }
   for (BacktraceMap::const_iterator it = map->begin(); it != map->end(); ++it) {
@@ -153,9 +166,11 @@ static bool ContainedWithinExistingMap(uint8_t* ptr, size_t size,
       return true;
     }
   }
-  PrintFileToLog("/proc/self/maps", LogSeverity::ERROR);
-  *error_msg = StringPrintf("Requested region 0x%08" PRIxPTR "-0x%08" PRIxPTR " does not overlap "
-                            "any existing map. See process maps in the log.", begin, end);
+  if (error_msg != nullptr) {
+    PrintFileToLog("/proc/self/maps", LogSeverity::ERROR);
+    *error_msg = StringPrintf("Requested region 0x%08" PRIxPTR "-0x%08" PRIxPTR " does not overlap "
+                              "any existing map. See process maps in the log.", begin, end);
+  }
   return false;
 }
 
@@ -221,29 +236,34 @@ static bool CheckMapRequest(uint8_t* expected_ptr, void* actual_ptr, size_t byte
   // We call this here so that we can try and generate a full error
   // message with the overlapping mapping. There's no guarantee that
   // that there will be an overlap though, since
-  // - The kernel is not *required* to honour expected_ptr unless MAP_FIXED is
+  // - The kernel is not *required* to honor expected_ptr unless MAP_FIXED is
   //   true, even if there is no overlap
   // - There might have been an overlap at the point of mmap, but the
   //   overlapping region has since been unmapped.
   std::string error_detail;
   CheckNonOverlapping(expected, limit, &error_detail);
 
-  std::ostringstream os;
-  os <<  StringPrintf("Failed to mmap at expected address, mapped at "
-                      "0x%08" PRIxPTR " instead of 0x%08" PRIxPTR,
-                      actual, expected);
-  if (!error_detail.empty()) {
-    os << " : " << error_detail;
+  if (error_msg != nullptr) {
+    std::ostringstream os;
+    os <<  StringPrintf("Failed to mmap at expected address, mapped at "
+                        "0x%08" PRIxPTR " instead of 0x%08" PRIxPTR,
+                        actual, expected);
+    if (!error_detail.empty()) {
+      os << " : " << error_detail;
+    }
+    *error_msg = os.str();
   }
-
-  *error_msg = os.str();
   return false;
 }
 
 #if USE_ART_LOW_4G_ALLOCATOR
-static inline void* TryMemMapLow4GB(void* ptr, size_t page_aligned_byte_count, int prot, int flags,
-                                    int fd) {
-  void* actual = mmap(ptr, page_aligned_byte_count, prot, flags, fd, 0);
+static inline void* TryMemMapLow4GB(void* ptr,
+                                    size_t page_aligned_byte_count,
+                                    int prot,
+                                    int flags,
+                                    int fd,
+                                    off_t offset) {
+  void* actual = mmap(ptr, page_aligned_byte_count, prot, flags, fd, offset);
   if (actual != MAP_FAILED) {
     // Since we didn't use MAP_FIXED the kernel may have mapped it somewhere not in the low
     // 4GB. If this is the case, unmap and retry.
@@ -256,8 +276,13 @@ static inline void* TryMemMapLow4GB(void* ptr, size_t page_aligned_byte_count, i
 }
 #endif
 
-MemMap* MemMap::MapAnonymous(const char* name, uint8_t* expected_ptr, size_t byte_count, int prot,
-                             bool low_4gb, bool reuse, std::string* error_msg) {
+MemMap* MemMap::MapAnonymous(const char* name,
+                             uint8_t* expected_ptr,
+                             size_t byte_count,
+                             int prot,
+                             bool low_4gb,
+                             bool reuse,
+                             std::string* error_msg) {
 #ifndef __LP64__
   UNUSED(low_4gb);
 #endif
@@ -279,7 +304,7 @@ MemMap* MemMap::MapAnonymous(const char* name, uint8_t* expected_ptr, size_t byt
   ScopedFd fd(-1);
 
 #ifdef USE_ASHMEM
-#ifdef HAVE_ANDROID_OS
+#ifdef __ANDROID__
   const bool use_ashmem = true;
 #else
   // When not on Android ashmem is faked using files in /tmp. Ensure that such files won't
@@ -306,122 +331,14 @@ MemMap* MemMap::MapAnonymous(const char* name, uint8_t* expected_ptr, size_t byt
   // We need to store and potentially set an error number for pretty printing of errors
   int saved_errno = 0;
 
-#ifdef __LP64__
-  // When requesting low_4g memory and having an expectation, the requested range should fit into
-  // 4GB.
-  if (low_4gb && (
-      // Start out of bounds.
-      (reinterpret_cast<uintptr_t>(expected_ptr) >> 32) != 0 ||
-      // End out of bounds. For simplicity, this will fail for the last page of memory.
-      (reinterpret_cast<uintptr_t>(expected_ptr + page_aligned_byte_count) >> 32) != 0)) {
-    *error_msg = StringPrintf("The requested address space (%p, %p) cannot fit in low_4gb",
-                              expected_ptr, expected_ptr + page_aligned_byte_count);
-    return nullptr;
-  }
-#endif
-
-  // TODO:
-  // A page allocator would be a useful abstraction here, as
-  // 1) It is doubtful that MAP_32BIT on x86_64 is doing the right job for us
-  // 2) The linear scheme, even with simple saving of the last known position, is very crude
-#if USE_ART_LOW_4G_ALLOCATOR
-  // MAP_32BIT only available on x86_64.
-  void* actual = MAP_FAILED;
-  if (low_4gb && expected_ptr == nullptr) {
-    bool first_run = true;
-
-    MutexLock mu(Thread::Current(), *Locks::mem_maps_lock_);
-    for (uintptr_t ptr = next_mem_pos_; ptr < 4 * GB; ptr += kPageSize) {
-      // Use maps_ as an optimization to skip over large maps.
-      // Find the first map which is address > ptr.
-      auto it = maps_->upper_bound(reinterpret_cast<void*>(ptr));
-      if (it != maps_->begin()) {
-        auto before_it = it;
-        --before_it;
-        // Start at the end of the map before the upper bound.
-        ptr = std::max(ptr, reinterpret_cast<uintptr_t>(before_it->second->BaseEnd()));
-        CHECK_ALIGNED(ptr, kPageSize);
-      }
-      while (it != maps_->end()) {
-        // How much space do we have until the next map?
-        size_t delta = reinterpret_cast<uintptr_t>(it->first) - ptr;
-        // If the space may be sufficient, break out of the loop.
-        if (delta >= page_aligned_byte_count) {
-          break;
-        }
-        // Otherwise, skip to the end of the map.
-        ptr = reinterpret_cast<uintptr_t>(it->second->BaseEnd());
-        CHECK_ALIGNED(ptr, kPageSize);
-        ++it;
-      }
-
-      // Try to see if we get lucky with this address since none of the ART maps overlap.
-      actual = TryMemMapLow4GB(reinterpret_cast<void*>(ptr), page_aligned_byte_count, prot, flags,
-                               fd.get());
-      if (actual != MAP_FAILED) {
-        next_mem_pos_ = reinterpret_cast<uintptr_t>(actual) + page_aligned_byte_count;
-        break;
-      }
-
-      if (4U * GB - ptr < page_aligned_byte_count) {
-        // Not enough memory until 4GB.
-        if (first_run) {
-          // Try another time from the bottom;
-          ptr = LOW_MEM_START - kPageSize;
-          first_run = false;
-          continue;
-        } else {
-          // Second try failed.
-          break;
-        }
-      }
-
-      uintptr_t tail_ptr;
-
-      // Check pages are free.
-      bool safe = true;
-      for (tail_ptr = ptr; tail_ptr < ptr + page_aligned_byte_count; tail_ptr += kPageSize) {
-        if (msync(reinterpret_cast<void*>(tail_ptr), kPageSize, 0) == 0) {
-          safe = false;
-          break;
-        } else {
-          DCHECK_EQ(errno, ENOMEM);
-        }
-      }
-
-      next_mem_pos_ = tail_ptr;  // update early, as we break out when we found and mapped a region
-
-      if (safe == true) {
-        actual = TryMemMapLow4GB(reinterpret_cast<void*>(ptr), page_aligned_byte_count, prot, flags,
-                                 fd.get());
-        if (actual != MAP_FAILED) {
-            break;
-        }
-      } else {
-        // Skip over last page.
-        ptr = tail_ptr;
-      }
-    }
-
-    if (actual == MAP_FAILED) {
-      LOG(ERROR) << "Could not find contiguous low-memory space.";
-      saved_errno = ENOMEM;
-    }
-  } else {
-    actual = mmap(expected_ptr, page_aligned_byte_count, prot, flags, fd.get(), 0);
-    saved_errno = errno;
-  }
-
-#else
-#if defined(__LP64__)
-  if (low_4gb && expected_ptr == nullptr) {
-    flags |= MAP_32BIT;
-  }
-#endif
-
-  void* actual = mmap(expected_ptr, page_aligned_byte_count, prot, flags, fd.get(), 0);
+  void* actual = MapInternal(expected_ptr,
+                             page_aligned_byte_count,
+                             prot,
+                             flags,
+                             fd.get(),
+                             0,
+                             low_4gb);
   saved_errno = errno;
-#endif
 
   if (actual == MAP_FAILED) {
     PrintFileToLog("/proc/self/maps", LogSeverity::WARNING);
@@ -436,7 +353,7 @@ MemMap* MemMap::MapAnonymous(const char* name, uint8_t* expected_ptr, size_t byt
     return nullptr;
   }
   return new MemMap(name, reinterpret_cast<uint8_t*>(actual), byte_count, actual,
-                    page_aligned_byte_count, prot, false);
+                    page_aligned_byte_count, prot, reuse);
 }
 
 MemMap* MemMap::MapDummy(const char* name, uint8_t* addr, size_t byte_count) {
@@ -447,8 +364,15 @@ MemMap* MemMap::MapDummy(const char* name, uint8_t* addr, size_t byte_count) {
   return new MemMap(name, addr, byte_count, addr, page_aligned_byte_count, 0, true /* reuse */);
 }
 
-MemMap* MemMap::MapFileAtAddress(uint8_t* expected_ptr, size_t byte_count, int prot, int flags,
-                                 int fd, off_t start, bool reuse, const char* filename,
+MemMap* MemMap::MapFileAtAddress(uint8_t* expected_ptr,
+                                 size_t byte_count,
+                                 int prot,
+                                 int flags,
+                                 int fd,
+                                 off_t start,
+                                 bool low_4gb,
+                                 bool reuse,
+                                 const char* filename,
                                  std::string* error_msg) {
   CHECK_NE(0, prot);
   CHECK_NE(0, flags & (MAP_SHARED | MAP_PRIVATE));
@@ -460,7 +384,8 @@ MemMap* MemMap::MapFileAtAddress(uint8_t* expected_ptr, size_t byte_count, int p
     // Only use this if you actually made the page reservation yourself.
     CHECK(expected_ptr != nullptr);
 
-    DCHECK(ContainedWithinExistingMap(expected_ptr, byte_count, error_msg)) << *error_msg;
+    DCHECK(ContainedWithinExistingMap(expected_ptr, byte_count, error_msg))
+        << ((error_msg != nullptr) ? *error_msg : std::string());
     flags |= MAP_FIXED;
   } else {
     CHECK_EQ(0, flags & MAP_FIXED);
@@ -481,37 +406,66 @@ MemMap* MemMap::MapFileAtAddress(uint8_t* expected_ptr, size_t byte_count, int p
   uint8_t* page_aligned_expected =
       (expected_ptr == nullptr) ? nullptr : (expected_ptr - page_offset);
 
-  uint8_t* actual = reinterpret_cast<uint8_t*>(mmap(page_aligned_expected,
-                                              page_aligned_byte_count,
-                                              prot,
-                                              flags,
-                                              fd,
-                                              page_aligned_offset));
+  size_t redzone_size = 0;
+  if (RUNNING_ON_MEMORY_TOOL && kMemoryToolAddsRedzones && expected_ptr == nullptr) {
+    redzone_size = kPageSize;
+    page_aligned_byte_count += redzone_size;
+  }
+
+  uint8_t* actual = reinterpret_cast<uint8_t*>(MapInternal(page_aligned_expected,
+                                                           page_aligned_byte_count,
+                                                           prot,
+                                                           flags,
+                                                           fd,
+                                                           page_aligned_offset,
+                                                           low_4gb));
   if (actual == MAP_FAILED) {
-    auto saved_errno = errno;
+    if (error_msg != nullptr) {
+      auto saved_errno = errno;
 
-    PrintFileToLog("/proc/self/maps", LogSeverity::WARNING);
+      PrintFileToLog("/proc/self/maps", LogSeverity::WARNING);
 
-    *error_msg = StringPrintf("mmap(%p, %zd, 0x%x, 0x%x, %d, %" PRId64
-                              ") of file '%s' failed: %s. See process maps in the log.",
-                              page_aligned_expected, page_aligned_byte_count, prot, flags, fd,
-                              static_cast<int64_t>(page_aligned_offset), filename,
-                              strerror(saved_errno));
+      *error_msg = StringPrintf("mmap(%p, %zd, 0x%x, 0x%x, %d, %" PRId64
+                                ") of file '%s' failed: %s. See process maps in the log.",
+                                page_aligned_expected, page_aligned_byte_count, prot, flags, fd,
+                                static_cast<int64_t>(page_aligned_offset), filename,
+                                strerror(saved_errno));
+    }
     return nullptr;
   }
   std::ostringstream check_map_request_error_msg;
   if (!CheckMapRequest(expected_ptr, actual, page_aligned_byte_count, error_msg)) {
     return nullptr;
   }
+  if (redzone_size != 0) {
+    const uint8_t *real_start = actual + page_offset;
+    const uint8_t *real_end = actual + page_offset + byte_count;
+    const uint8_t *mapping_end = actual + page_aligned_byte_count;
+
+    MEMORY_TOOL_MAKE_NOACCESS(actual, real_start - actual);
+    MEMORY_TOOL_MAKE_NOACCESS(real_end, mapping_end - real_end);
+    page_aligned_byte_count -= redzone_size;
+  }
+
   return new MemMap(filename, actual + page_offset, byte_count, actual, page_aligned_byte_count,
-                    prot, reuse);
+                    prot, reuse, redzone_size);
 }
 
 MemMap::~MemMap() {
   if (base_begin_ == nullptr && base_size_ == 0) {
     return;
   }
+
+  // Unlike Valgrind, AddressSanitizer requires that all manually poisoned memory is unpoisoned
+  // before it is returned to the system.
+  if (redzone_size_ != 0) {
+    MEMORY_TOOL_MAKE_UNDEFINED(
+        reinterpret_cast<char*>(base_begin_) + base_size_ - redzone_size_,
+        redzone_size_);
+  }
+
   if (!reuse_) {
+    MEMORY_TOOL_MAKE_UNDEFINED(base_begin_, base_size_);
     int result = munmap(base_begin_, base_size_);
     if (result == -1) {
       PLOG(FATAL) << "munmap failed";
@@ -534,9 +488,9 @@ MemMap::~MemMap() {
 }
 
 MemMap::MemMap(const std::string& name, uint8_t* begin, size_t size, void* base_begin,
-               size_t base_size, int prot, bool reuse)
+               size_t base_size, int prot, bool reuse, size_t redzone_size)
     : name_(name), begin_(begin), size_(size), base_begin_(base_begin), base_size_(base_size),
-      prot_(prot), reuse_(reuse) {
+      prot_(prot), reuse_(reuse), redzone_size_(redzone_size) {
   if (size_ == 0) {
     CHECK(begin_ == nullptr);
     CHECK(base_begin_ == nullptr);
@@ -558,10 +512,10 @@ MemMap* MemMap::RemapAtEnd(uint8_t* new_end, const char* tail_name, int tail_pro
   DCHECK_GE(new_end, Begin());
   DCHECK_LE(new_end, End());
   DCHECK_LE(begin_ + size_, reinterpret_cast<uint8_t*>(base_begin_) + base_size_);
-  DCHECK(IsAligned<kPageSize>(begin_));
-  DCHECK(IsAligned<kPageSize>(base_begin_));
-  DCHECK(IsAligned<kPageSize>(reinterpret_cast<uint8_t*>(base_begin_) + base_size_));
-  DCHECK(IsAligned<kPageSize>(new_end));
+  DCHECK_ALIGNED(begin_, kPageSize);
+  DCHECK_ALIGNED(base_begin_, kPageSize);
+  DCHECK_ALIGNED(reinterpret_cast<uint8_t*>(base_begin_) + base_size_, kPageSize);
+  DCHECK_ALIGNED(new_end, kPageSize);
   uint8_t* old_end = begin_ + size_;
   uint8_t* old_base_end = reinterpret_cast<uint8_t*>(base_begin_) + base_size_;
   uint8_t* new_base_end = new_end;
@@ -576,7 +530,7 @@ MemMap* MemMap::RemapAtEnd(uint8_t* new_end, const char* tail_name, int tail_pro
   uint8_t* tail_base_begin = new_base_end;
   size_t tail_base_size = old_base_end - new_base_end;
   DCHECK_EQ(tail_base_begin + tail_base_size, old_base_end);
-  DCHECK(IsAligned<kPageSize>(tail_base_size));
+  DCHECK_ALIGNED(tail_base_size, kPageSize);
 
 #ifdef USE_ASHMEM
   // android_os_Debug.cpp read_mapinfo assumes all ashmem regions associated with the VM are
@@ -595,6 +549,8 @@ MemMap* MemMap::RemapAtEnd(uint8_t* new_end, const char* tail_name, int tail_pro
   int flags = MAP_PRIVATE | MAP_ANONYMOUS;
 #endif
 
+
+  MEMORY_TOOL_MAKE_UNDEFINED(tail_base_begin, tail_base_size);
   // Unmap/map the tail region.
   int result = munmap(tail_base_begin, tail_base_size);
   if (result == -1) {
@@ -697,7 +653,7 @@ void MemMap::DumpMapsLocked(std::ostream& os, bool terse) {
     size_t num_gaps = 0;
     size_t num = 1u;
     size_t size = map->BaseSize();
-    CHECK(IsAligned<kPageSize>(size));
+    CHECK_ALIGNED(size, kPageSize);
     void* end = map->BaseEnd();
     while (it != maps_end &&
         it->second->GetProtect() == map->GetProtect() &&
@@ -711,12 +667,12 @@ void MemMap::DumpMapsLocked(std::ostream& os, bool terse) {
         }
         size_t gap =
             reinterpret_cast<uintptr_t>(it->second->BaseBegin()) - reinterpret_cast<uintptr_t>(end);
-        CHECK(IsAligned<kPageSize>(gap));
+        CHECK_ALIGNED(gap, kPageSize);
         os << "~0x" << std::hex << (gap / kPageSize) << "P";
         num = 0u;
         size = 0u;
       }
-      CHECK(IsAligned<kPageSize>(it->second->BaseSize()));
+      CHECK_ALIGNED(it->second->BaseSize(), kPageSize);
       ++num;
       size += it->second->BaseSize();
       end = it->second->BaseEnd();
@@ -778,10 +734,140 @@ void MemMap::SetSize(size_t new_size) {
   CHECK_ALIGNED(new_size, kPageSize);
   CHECK_EQ(base_size_, size_) << "Unsupported";
   CHECK_LE(new_size, base_size_);
+  MEMORY_TOOL_MAKE_UNDEFINED(
+      reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(BaseBegin()) +
+                              new_size),
+      base_size_ - new_size);
   CHECK_EQ(munmap(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(BaseBegin()) + new_size),
                   base_size_ - new_size), 0) << new_size << " " << base_size_;
   base_size_ = new_size;
   size_ = new_size;
+}
+
+void* MemMap::MapInternal(void* addr,
+                          size_t length,
+                          int prot,
+                          int flags,
+                          int fd,
+                          off_t offset,
+                          bool low_4gb) {
+#ifdef __LP64__
+  // When requesting low_4g memory and having an expectation, the requested range should fit into
+  // 4GB.
+  if (low_4gb && (
+      // Start out of bounds.
+      (reinterpret_cast<uintptr_t>(addr) >> 32) != 0 ||
+      // End out of bounds. For simplicity, this will fail for the last page of memory.
+      ((reinterpret_cast<uintptr_t>(addr) + length) >> 32) != 0)) {
+    LOG(ERROR) << "The requested address space (" << addr << ", "
+               << reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(addr) + length)
+               << ") cannot fit in low_4gb";
+    return MAP_FAILED;
+  }
+#else
+  UNUSED(low_4gb);
+#endif
+  DCHECK_ALIGNED(length, kPageSize);
+  if (low_4gb) {
+    DCHECK_EQ(flags & MAP_FIXED, 0);
+  }
+  // TODO:
+  // A page allocator would be a useful abstraction here, as
+  // 1) It is doubtful that MAP_32BIT on x86_64 is doing the right job for us
+  void* actual = MAP_FAILED;
+#if USE_ART_LOW_4G_ALLOCATOR
+  // MAP_32BIT only available on x86_64.
+  if (low_4gb && addr == nullptr) {
+    bool first_run = true;
+
+    MutexLock mu(Thread::Current(), *Locks::mem_maps_lock_);
+    for (uintptr_t ptr = next_mem_pos_; ptr < 4 * GB; ptr += kPageSize) {
+      // Use maps_ as an optimization to skip over large maps.
+      // Find the first map which is address > ptr.
+      auto it = maps_->upper_bound(reinterpret_cast<void*>(ptr));
+      if (it != maps_->begin()) {
+        auto before_it = it;
+        --before_it;
+        // Start at the end of the map before the upper bound.
+        ptr = std::max(ptr, reinterpret_cast<uintptr_t>(before_it->second->BaseEnd()));
+        CHECK_ALIGNED(ptr, kPageSize);
+      }
+      while (it != maps_->end()) {
+        // How much space do we have until the next map?
+        size_t delta = reinterpret_cast<uintptr_t>(it->first) - ptr;
+        // If the space may be sufficient, break out of the loop.
+        if (delta >= length) {
+          break;
+        }
+        // Otherwise, skip to the end of the map.
+        ptr = reinterpret_cast<uintptr_t>(it->second->BaseEnd());
+        CHECK_ALIGNED(ptr, kPageSize);
+        ++it;
+      }
+
+      // Try to see if we get lucky with this address since none of the ART maps overlap.
+      actual = TryMemMapLow4GB(reinterpret_cast<void*>(ptr), length, prot, flags, fd, offset);
+      if (actual != MAP_FAILED) {
+        next_mem_pos_ = reinterpret_cast<uintptr_t>(actual) + length;
+        return actual;
+      }
+
+      if (4U * GB - ptr < length) {
+        // Not enough memory until 4GB.
+        if (first_run) {
+          // Try another time from the bottom;
+          ptr = LOW_MEM_START - kPageSize;
+          first_run = false;
+          continue;
+        } else {
+          // Second try failed.
+          break;
+        }
+      }
+
+      uintptr_t tail_ptr;
+
+      // Check pages are free.
+      bool safe = true;
+      for (tail_ptr = ptr; tail_ptr < ptr + length; tail_ptr += kPageSize) {
+        if (msync(reinterpret_cast<void*>(tail_ptr), kPageSize, 0) == 0) {
+          safe = false;
+          break;
+        } else {
+          DCHECK_EQ(errno, ENOMEM);
+        }
+      }
+
+      next_mem_pos_ = tail_ptr;  // update early, as we break out when we found and mapped a region
+
+      if (safe == true) {
+        actual = TryMemMapLow4GB(reinterpret_cast<void*>(ptr), length, prot, flags, fd, offset);
+        if (actual != MAP_FAILED) {
+          return actual;
+        }
+      } else {
+        // Skip over last page.
+        ptr = tail_ptr;
+      }
+    }
+
+    if (actual == MAP_FAILED) {
+      LOG(ERROR) << "Could not find contiguous low-memory space.";
+      errno = ENOMEM;
+    }
+  } else {
+    actual = mmap(addr, length, prot, flags, fd, offset);
+  }
+
+#else
+#if defined(__LP64__)
+  if (low_4gb && addr == nullptr) {
+    flags |= MAP_32BIT;
+  }
+#endif
+  actual = mmap(addr, length, prot, flags, fd, offset);
+#endif
+  return actual;
 }
 
 std::ostream& operator<<(std::ostream& os, const MemMap& mem_map) {

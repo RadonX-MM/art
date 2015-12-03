@@ -216,8 +216,7 @@ void ArmMir2Lir::GenFusedLongCmpImmBranch(BasicBlock* bb, RegLocation rl_src1,
 
 void ArmMir2Lir::GenSelectConst32(RegStorage left_op, RegStorage right_op, ConditionCode code,
                                   int32_t true_val, int32_t false_val, RegStorage rs_dest,
-                                  RegisterClass dest_reg_class) {
-  UNUSED(dest_reg_class);
+                                  RegisterClass dest_reg_class ATTRIBUTE_UNUSED) {
   // TODO: Generalize the IT below to accept more than one-instruction loads.
   DCHECK(InexpensiveConstantInt(true_val));
   DCHECK(InexpensiveConstantInt(false_val));
@@ -239,8 +238,7 @@ void ArmMir2Lir::GenSelectConst32(RegStorage left_op, RegStorage right_op, Condi
   OpEndIT(it);
 }
 
-void ArmMir2Lir::GenSelect(BasicBlock* bb, MIR* mir) {
-  UNUSED(bb);
+void ArmMir2Lir::GenSelect(BasicBlock* bb ATTRIBUTE_UNUSED, MIR* mir) {
   RegLocation rl_result;
   RegLocation rl_src = mir_graph_->GetSrc(mir, 0);
   RegLocation rl_dest = mir_graph_->GetDest(mir);
@@ -516,9 +514,8 @@ static const MagicTable magic_table[] = {
 };
 
 // Integer division by constant via reciprocal multiply (Hacker's Delight, 10-4)
-bool ArmMir2Lir::SmallLiteralDivRem(Instruction::Code dalvik_opcode, bool is_div,
+bool ArmMir2Lir::SmallLiteralDivRem(Instruction::Code dalvik_opcode ATTRIBUTE_UNUSED, bool is_div,
                                     RegLocation rl_src, RegLocation rl_dest, int lit) {
-  UNUSED(dalvik_opcode);
   if ((lit < 0) || (lit >= static_cast<int>(sizeof(magic_table)/sizeof(magic_table[0])))) {
     return false;
   }
@@ -593,13 +590,20 @@ bool ArmMir2Lir::GetEasyMultiplyOp(int lit, ArmMir2Lir::EasyMultiplyOp* op) {
     return true;
   }
 
+  // At this point lit != 1 (which is a power of two).
+  DCHECK_NE(lit, 1);
   if (IsPowerOfTwo(lit - 1)) {
     op->op = kOpAdd;
     op->shift = CTZ(lit - 1);
     return true;
   }
 
-  if (IsPowerOfTwo(lit + 1)) {
+  if (lit == -1) {
+    // Can be created as neg.
+    op->op = kOpNeg;
+    op->shift = 0;
+    return true;
+  } else if (IsPowerOfTwo(lit + 1)) {
     op->op = kOpRsub;
     op->shift = CTZ(lit + 1);
     return true;
@@ -612,21 +616,26 @@ bool ArmMir2Lir::GetEasyMultiplyOp(int lit, ArmMir2Lir::EasyMultiplyOp* op) {
 
 // Try to convert *lit to 1~2 RegRegRegShift/RegRegShift forms.
 bool ArmMir2Lir::GetEasyMultiplyTwoOps(int lit, EasyMultiplyOp* ops) {
+  DCHECK_NE(lit, 1);           // A case of "1" should have been folded.
+  DCHECK_NE(lit, -1);          // A case of "-1" should have been folded.
   if (GetEasyMultiplyOp(lit, &ops[0])) {
     ops[1].op = kOpInvalid;
     ops[1].shift = 0;
     return true;
   }
 
-  int lit1 = lit;
-  uint32_t shift = CTZ(lit1);
+  DCHECK_NE(lit, 0);           // Should be handled above.
+  DCHECK(!IsPowerOfTwo(lit));  // Same.
+
+  int lit1 = lit;              // With the DCHECKs, it's clear we don't get "0", "1" or "-1" for
+  uint32_t shift = CTZ(lit1);  // lit1.
   if (GetEasyMultiplyOp(lit1 >> shift, &ops[0])) {
     ops[1].op = kOpLsl;
     ops[1].shift = shift;
     return true;
   }
 
-  lit1 = lit - 1;
+  lit1 = lit - 1;              // With the DCHECKs, it's clear we don't get "0" or "1" for lit1.
   shift = CTZ(lit1);
   if (GetEasyMultiplyOp(lit1 >> shift, &ops[0])) {
     ops[1].op = kOpAdd;
@@ -634,7 +643,7 @@ bool ArmMir2Lir::GetEasyMultiplyTwoOps(int lit, EasyMultiplyOp* ops) {
     return true;
   }
 
-  lit1 = lit + 1;
+  lit1 = lit + 1;              // With the DCHECKs, it's clear we don't get "0" here.
   shift = CTZ(lit1);
   if (GetEasyMultiplyOp(lit1 >> shift, &ops[0])) {
     ops[1].op = kOpRsub;
@@ -652,7 +661,7 @@ bool ArmMir2Lir::GetEasyMultiplyTwoOps(int lit, EasyMultiplyOp* ops) {
 // Additional temporary register is required,
 // if it need to generate 2 instructions and src/dest overlap.
 void ArmMir2Lir::GenEasyMultiplyTwoOps(RegStorage r_dest, RegStorage r_src, EasyMultiplyOp* ops) {
-  // tmp1 = ( src << shift1) + [ src | -src | 0 ]
+  // tmp1 = (( src << shift1) + [ src | -src | 0 ] ) | -src
   // dest = (tmp1 << shift2) + [ src | -src | 0 ]
 
   RegStorage r_tmp1;
@@ -674,6 +683,9 @@ void ArmMir2Lir::GenEasyMultiplyTwoOps(RegStorage r_dest, RegStorage r_src, Easy
     case kOpRsub:
       OpRegRegRegShift(kOpRsub, r_tmp1, r_src, r_src, EncodeShift(kArmLsl, ops[0].shift));
       break;
+    case kOpNeg:
+      OpRegReg(kOpNeg, r_tmp1, r_src);
+      break;
     default:
       DCHECK_EQ(ops[0].op, kOpInvalid);
       break;
@@ -691,6 +703,7 @@ void ArmMir2Lir::GenEasyMultiplyTwoOps(RegStorage r_dest, RegStorage r_src, Easy
     case kOpRsub:
       OpRegRegRegShift(kOpRsub, r_dest, r_src, r_tmp1, EncodeShift(kArmLsl, ops[1].shift));
       break;
+    // No negation allowed in second op.
     default:
       LOG(FATAL) << "Unexpected opcode passed to GenEasyMultiplyTwoOps";
       break;
@@ -712,16 +725,19 @@ bool ArmMir2Lir::EasyMultiply(RegLocation rl_src, RegLocation rl_dest, int lit) 
   return true;
 }
 
-RegLocation ArmMir2Lir::GenDivRem(RegLocation rl_dest, RegLocation rl_src1,
-                                  RegLocation rl_src2, bool is_div, int flags) {
-  UNUSED(rl_dest, rl_src1, rl_src2, is_div, flags);
+RegLocation ArmMir2Lir::GenDivRem(RegLocation rl_dest ATTRIBUTE_UNUSED,
+                                  RegLocation rl_src1 ATTRIBUTE_UNUSED,
+                                  RegLocation rl_src2 ATTRIBUTE_UNUSED,
+                                  bool is_div ATTRIBUTE_UNUSED,
+                                  int flags ATTRIBUTE_UNUSED) {
   LOG(FATAL) << "Unexpected use of GenDivRem for Arm";
   UNREACHABLE();
 }
 
-RegLocation ArmMir2Lir::GenDivRemLit(RegLocation rl_dest, RegLocation rl_src1, int lit,
-                                     bool is_div) {
-  UNUSED(rl_dest, rl_src1, lit, is_div);
+RegLocation ArmMir2Lir::GenDivRemLit(RegLocation rl_dest ATTRIBUTE_UNUSED,
+                                     RegLocation rl_src1 ATTRIBUTE_UNUSED,
+                                     int lit ATTRIBUTE_UNUSED,
+                                     bool is_div ATTRIBUTE_UNUSED) {
   LOG(FATAL) << "Unexpected use of GenDivRemLit for Arm";
   UNREACHABLE();
 }
@@ -1143,9 +1159,8 @@ void ArmMir2Lir::GenMaddMsubInt(RegLocation rl_dest, RegLocation rl_src1, RegLoc
 }
 
 void ArmMir2Lir::GenMultiplyByTwoBitMultiplier(RegLocation rl_src,
-                                               RegLocation rl_result, int lit,
+                                               RegLocation rl_result, int lit ATTRIBUTE_UNUSED,
                                                int first_bit, int second_bit) {
-  UNUSED(lit);
   OpRegRegRegShift(kOpAdd, rl_result.reg, rl_src.reg, rl_src.reg,
                    EncodeShift(kArmLsl, second_bit - first_bit));
   if (first_bit != 0) {
@@ -1240,9 +1255,8 @@ void ArmMir2Lir::GenNegLong(RegLocation rl_dest, RegLocation rl_src) {
   StoreValueWide(rl_dest, rl_result);
 }
 
-void ArmMir2Lir::GenMulLong(Instruction::Code opcode, RegLocation rl_dest,
+void ArmMir2Lir::GenMulLong(Instruction::Code opcode ATTRIBUTE_UNUSED, RegLocation rl_dest,
                             RegLocation rl_src1, RegLocation rl_src2) {
-  UNUSED(opcode);
   /*
    * tmp1     = src1.hi * src2.lo;  // src1.hi is no longer needed
    * dest     = src1.lo * src2.lo;
@@ -1547,8 +1561,7 @@ void ArmMir2Lir::GenArrayPut(int opt_flags, OpSize size, RegLocation rl_array,
 
 void ArmMir2Lir::GenShiftImmOpLong(Instruction::Code opcode,
                                    RegLocation rl_dest, RegLocation rl_src, RegLocation rl_shift,
-                                   int flags) {
-  UNUSED(flags);
+                                   int flags ATTRIBUTE_UNUSED) {
   rl_src = LoadValueWide(rl_src, kCoreReg);
   // Per spec, we only care about low 6 bits of shift amount.
   int shift_amount = mir_graph_->ConstantValue(rl_shift) & 0x3f;

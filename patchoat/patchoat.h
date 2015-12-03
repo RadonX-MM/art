@@ -94,16 +94,14 @@ class PatchOat {
                                         bool new_oat_out);  // Output oat was newly created?
 
   static void BitmapCallback(mirror::Object* obj, void* arg)
-      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+      SHARED_REQUIRES(Locks::mutator_lock_) {
     reinterpret_cast<PatchOat*>(arg)->VisitObject(obj);
   }
 
   void VisitObject(mirror::Object* obj)
-      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+      SHARED_REQUIRES(Locks::mutator_lock_);
   void FixupMethod(ArtMethod* object, ArtMethod* copy)
-      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-  void FixupNativePointerArray(mirror::PointerArray* object)
-      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+      SHARED_REQUIRES(Locks::mutator_lock_);
   bool InHeap(mirror::Object*);
 
   // Patches oat in place, modifying the oat_file given to the constructor.
@@ -113,13 +111,13 @@ class PatchOat {
   template <typename ElfFileImpl>
   bool PatchOatHeader(ElfFileImpl* oat_file);
 
-  bool PatchImage() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-  void PatchArtFields(const ImageHeader* image_header) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-  void PatchArtMethods(const ImageHeader* image_header) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+  bool PatchImage() SHARED_REQUIRES(Locks::mutator_lock_);
+  void PatchArtFields(const ImageHeader* image_header) SHARED_REQUIRES(Locks::mutator_lock_);
+  void PatchArtMethods(const ImageHeader* image_header) SHARED_REQUIRES(Locks::mutator_lock_);
   void PatchInternedStrings(const ImageHeader* image_header)
-      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+      SHARED_REQUIRES(Locks::mutator_lock_);
   void PatchDexFileArrays(mirror::ObjectArray<mirror::Object>* img_roots)
-      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+      SHARED_REQUIRES(Locks::mutator_lock_);
 
   bool WriteElf(File* out);
   bool WriteImage(File* out);
@@ -163,13 +161,6 @@ class PatchOat {
     return ret;
   }
 
-  // Look up the oat header from any elf file.
-  static const OatHeader* GetOatHeader(const ElfFile* elf_file);
-
-  // Templatized version to actually look up the oat header
-  template <typename ElfFileImpl>
-  static const OatHeader* GetOatHeader(const ElfFileImpl* elf_file);
-
   // Walks through the old image and patches the mmap'd copy of it to the new offset. It does not
   // change the heap.
   class PatchVisitor {
@@ -177,10 +168,15 @@ class PatchOat {
     PatchVisitor(PatchOat* patcher, mirror::Object* copy) : patcher_(patcher), copy_(copy) {}
     ~PatchVisitor() {}
     void operator() (mirror::Object* obj, MemberOffset off, bool b) const
-      EXCLUSIVE_LOCKS_REQUIRED(Locks::mutator_lock_, Locks::heap_bitmap_lock_);
+        REQUIRES(Locks::mutator_lock_, Locks::heap_bitmap_lock_);
     // For reference classes.
     void operator() (mirror::Class* cls, mirror::Reference* ref) const
-      EXCLUSIVE_LOCKS_REQUIRED(Locks::mutator_lock_, Locks::heap_bitmap_lock_);
+        REQUIRES(Locks::mutator_lock_, Locks::heap_bitmap_lock_);
+    // TODO: Consider using these for updating native class roots?
+    void VisitRootIfNonNull(mirror::CompressedReference<mirror::Object>* root ATTRIBUTE_UNUSED)
+        const {}
+    void VisitRoot(mirror::CompressedReference<mirror::Object>* root ATTRIBUTE_UNUSED) const {}
+
   private:
     PatchOat* const patcher_;
     mirror::Object* const copy_;
@@ -202,6 +198,9 @@ class PatchOat {
   TimingLogger* timings_;
 
   friend class FixupRootVisitor;
+  friend class RelocatedPointerVisitor;
+  friend class PatchOatArtFieldVisitor;
+  friend class PatchOatArtMethodVisitor;
   DISALLOW_IMPLICIT_CONSTRUCTORS(PatchOat);
 };
 

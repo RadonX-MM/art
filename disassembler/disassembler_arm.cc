@@ -22,6 +22,7 @@
 #include <sstream>
 
 #include "arch/arm/registers_arm.h"
+#include "base/bit_utils.h"
 #include "base/logging.h"
 #include "base/stringprintf.h"
 #include "thread.h"
@@ -201,14 +202,13 @@ std::ostream& operator<<(std::ostream& os, const RegisterList& rhs) {
 }
 
 struct FpRegister {
-  explicit FpRegister(uint32_t instr, uint16_t at_bit, uint16_t extra_at_bit) {
+  FpRegister(uint32_t instr, uint16_t at_bit, uint16_t extra_at_bit) {
     size = (instr >> 8) & 1;
     uint32_t Vn = (instr >> at_bit) & 0xF;
     uint32_t N = (instr >> extra_at_bit) & 1;
     r = (size != 0 ? ((N << 4) | Vn) : ((Vn << 1) | N));
   }
-  explicit FpRegister(uint32_t instr, uint16_t at_bit, uint16_t extra_at_bit,
-                      uint32_t forced_size) {
+  FpRegister(uint32_t instr, uint16_t at_bit, uint16_t extra_at_bit, uint32_t forced_size) {
     size = forced_size;
     uint32_t Vn = (instr >> at_bit) & 0xF;
     uint32_t N = (instr >> extra_at_bit) & 1;
@@ -1453,6 +1453,20 @@ size_t DisassemblerArm::DumpThumb32(std::ostream& os, const uint8_t* instr_ptr) 
               args << " (UNPREDICTABLE)";
             }
           }  // else unknown instruction
+          break;
+        }
+        case 0x2B: {  // 0101011
+          //  CLZ - 111 11 0101011 mmmm 1111 dddd 1000 mmmm
+          if ((instr & 0xf0f0) == 0xf080) {
+            opcode << "clz";
+            ArmRegister Rm(instr, 0);
+            ArmRegister Rd(instr, 8);
+            args << Rd << ", " << Rm;
+            ArmRegister Rm2(instr, 16);
+            if (Rm.r != Rm2.r || Rm.r == 13 || Rm.r == 15 || Rd.r == 13 || Rd.r == 15) {
+              args << " (UNPREDICTABLE)";
+            }
+          }
           break;
         }
       default:      // more formats

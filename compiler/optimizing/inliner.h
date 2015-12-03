@@ -28,6 +28,7 @@
 
 namespace art {
 
+class CodeGenerator;
 class CompilerDriver;
 class DexCompilationUnit;
 class HGraph;
@@ -37,38 +38,39 @@ class OptimizingCompilerStats;
 class HInliner : public HOptimization {
  public:
   HInliner(HGraph* outer_graph,
+           CodeGenerator* codegen,
            const DexCompilationUnit& outer_compilation_unit,
            const DexCompilationUnit& caller_compilation_unit,
            CompilerDriver* compiler_driver,
+           StackHandleScopeCollection* handles,
            OptimizingCompilerStats* stats,
            size_t depth = 0)
-      : HOptimization(outer_graph, true, kInlinerPassName, stats),
+      : HOptimization(outer_graph, kInlinerPassName, stats),
         outer_compilation_unit_(outer_compilation_unit),
         caller_compilation_unit_(caller_compilation_unit),
+        codegen_(codegen),
         compiler_driver_(compiler_driver),
-        depth_(depth) {}
+        depth_(depth),
+        number_of_inlined_instructions_(0),
+        handles_(handles) {}
 
   void Run() OVERRIDE;
 
   static constexpr const char* kInlinerPassName = "inliner";
 
  private:
-  bool CanInlineMethod(const DexCompilationUnit& dex_compilation_unit,
-                        HGraph& graph,
-                        HInvoke* invoke_instruction) const QC_WEAK;
-  void TryRemoveExceptionChecks(const DexCompilationUnit& dex_compilation_unit,
-                                HGraph& graph,
-                                HInvoke* invoke_instruction) const QC_WEAK;
-  bool TryInline(HInvoke* invoke_instruction, uint32_t method_index) const;
+  bool TryInline(HInvoke* invoke_instruction);
   bool TryBuildAndInline(ArtMethod* resolved_method,
                          HInvoke* invoke_instruction,
-                         uint32_t method_index,
-                         bool can_use_dex_cache) const;
+                         bool same_dex_file);
 
   const DexCompilationUnit& outer_compilation_unit_;
   const DexCompilationUnit& caller_compilation_unit_;
+  CodeGenerator* const codegen_;
   CompilerDriver* const compiler_driver_;
   const size_t depth_;
+  size_t number_of_inlined_instructions_;
+  StackHandleScopeCollection* const handles_;
 
   DISALLOW_COPY_AND_ASSIGN(HInliner);
 };

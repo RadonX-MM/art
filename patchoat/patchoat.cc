@@ -92,6 +92,32 @@ static bool LocationToFilename(const std::string& location, InstructionSet isa,
   }
 }
 
+static const OatHeader* GetOatHeader(const ElfFile* elf_file) {
+  uint64_t off = 0;
+  if (!elf_file->GetSectionOffsetAndSize(".rodata", &off, nullptr)) {
+    return nullptr;
+  }
+
+  OatHeader* oat_header = reinterpret_cast<OatHeader*>(elf_file->Begin() + off);
+  return oat_header;
+}
+
+// This function takes an elf file and reads the current patch delta value
+// encoded in its oat header value
+static bool ReadOatPatchDelta(const ElfFile* elf_file, off_t* delta, std::string* error_msg) {
+  const OatHeader* oat_header = GetOatHeader(elf_file);
+  if (oat_header == nullptr) {
+    *error_msg = "Unable to get oat header from elf file.";
+    return false;
+  }
+  if (!oat_header->IsValid()) {
+    *error_msg = "Elf file has an invalid oat header";
+    return false;
+  }
+  *delta = oat_header->GetImagePatchDelta();
+  return true;
+}
+
 bool PatchOat::Patch(const std::string& image_location, off_t delta,
                      File* output_image, InstructionSet isa,
                      TimingLogger* timings) {
@@ -138,6 +164,7 @@ bool PatchOat::Patch(const std::string& image_location, off_t delta,
   std::string img = "-Ximage:" + image_location;
   options.push_back(std::make_pair(img.c_str(), nullptr));
   options.push_back(std::make_pair("imageinstructionset", reinterpret_cast<const void*>(isa_name)));
+  options.push_back(std::make_pair("-Xno-sig-chain", nullptr));
   if (!Runtime::Create(options, false)) {
     LOG(ERROR) << "Unable to initialize runtime";
     return false;
@@ -150,18 +177,21 @@ bool PatchOat::Patch(const std::string& image_location, off_t delta,
   t.NewTiming("Image and oat Patching setup");
   // Create the map where we will write the image patches to.
   std::string error_msg;
-  std::unique_ptr<MemMap> image(MemMap::MapFile(image_len, PROT_READ | PROT_WRITE, MAP_PRIVATE,
-                                                input_image->Fd(), 0,
+  std::unique_ptr<MemMap> image(MemMap::MapFile(image_len,
+                                                PROT_READ | PROT_WRITE,
+                                                MAP_PRIVATE,
+                                                input_image->Fd(),
+                                                0,
+                                                /*low_4gb*/false,
                                                 input_image->GetPath().c_str(),
                                                 &error_msg));
   if (image.get() == nullptr) {
     LOG(ERROR) << "unable to map image file " << input_image->GetPath() << " : " << error_msg;
     return false;
   }
-  gc::space::ImageSpace* ispc = Runtime::Current()->GetHeap()->GetImageSpace();
+  gc::space::ImageSpace* ispc = Runtime::Current()->GetHeap()->GetBootImageSpace();
 
-  PatchOat p(isa, image.release(), ispc->GetLiveBitmap(), ispc->GetMemMap(),
-             delta, timings);
+  PatchOat p(isa, image.release(), ispc->GetLiveBitmap(), ispc->GetMemMap(), delta, timings);
   t.NewTiming("Patching files");
   if (!p.PatchImage()) {
     LOG(ERROR) << "Failed to patch image file " << input_image->GetPath();
@@ -233,6 +263,7 @@ bool PatchOat::Patch(File* input_oat, const std::string& image_location, off_t d
   std::string img = "-Ximage:" + image_location;
   options.push_back(std::make_pair(img.c_str(), nullptr));
   options.push_back(std::make_pair("imageinstructionset", reinterpret_cast<const void*>(isa_name)));
+  options.push_back(std::make_pair("-Xno-sig-chain", nullptr));
   if (!Runtime::Create(options, false)) {
     LOG(ERROR) << "Unable to initialize runtime";
     return false;
@@ -245,15 +276,19 @@ bool PatchOat::Patch(File* input_oat, const std::string& image_location, off_t d
   t.NewTiming("Image and oat Patching setup");
   // Create the map where we will write the image patches to.
   std::string error_msg;
-  std::unique_ptr<MemMap> image(MemMap::MapFile(image_len, PROT_READ | PROT_WRITE, MAP_PRIVATE,
-                                                input_image->Fd(), 0,
+  std::unique_ptr<MemMap> image(MemMap::MapFile(image_len,
+                                                PROT_READ | PROT_WRITE,
+                                                MAP_PRIVATE,
+                                                input_image->Fd(),
+                                                0,
+                                                /*low_4gb*/false,
                                                 input_image->GetPath().c_str(),
                                                 &error_msg));
   if (image.get() == nullptr) {
     LOG(ERROR) << "unable to map image file " << input_image->GetPath() << " : " << error_msg;
     return false;
   }
-  gc::space::ImageSpace* ispc = Runtime::Current()->GetHeap()->GetImageSpace();
+  gc::space::ImageSpace* ispc = Runtime::Current()->GetHeap()->GetBootImageSpace();
 
   std::unique_ptr<ElfFile> elf(ElfFile::Open(input_oat,
                                              PROT_READ | PROT_WRITE, MAP_PRIVATE, &error_msg));
@@ -417,24 +452,43 @@ bool PatchOat::ReplaceOatFileWithSymlink(const std::string& input_oat_filename,
   return true;
 }
 
-void PatchOat::PatchArtFields(const ImageHeader* image_header) {
-  const auto& section = image_header->GetImageSection(ImageHeader::kSectionArtFields);
-  for (size_t pos = 0; pos < section.Size(); pos += sizeof(ArtField)) {
-    auto* src = reinterpret_cast<ArtField*>(heap_->Begin() + section.Offset() + pos);
-    auto* dest = RelocatedCopyOf(src);
-    dest->SetDeclaringClass(RelocatedAddressOfPointer(src->GetDeclaringClass()));
+class PatchOatArtFieldVisitor : public ArtFieldVisitor {
+ public:
+  explicit PatchOatArtFieldVisitor(PatchOat* patch_oat) : patch_oat_(patch_oat) {}
+
+  void Visit(ArtField* field) OVERRIDE SHARED_REQUIRES(Locks::mutator_lock_) {
+    ArtField* const dest = patch_oat_->RelocatedCopyOf(field);
+    dest->SetDeclaringClass(patch_oat_->RelocatedAddressOfPointer(field->GetDeclaringClass()));
   }
+
+ private:
+  PatchOat* const patch_oat_;
+};
+
+void PatchOat::PatchArtFields(const ImageHeader* image_header) {
+  PatchOatArtFieldVisitor visitor(this);
+  const auto& section = image_header->GetImageSection(ImageHeader::kSectionArtFields);
+  section.VisitPackedArtFields(&visitor, heap_->Begin());
 }
+
+class PatchOatArtMethodVisitor : public ArtMethodVisitor {
+ public:
+  explicit PatchOatArtMethodVisitor(PatchOat* patch_oat) : patch_oat_(patch_oat) {}
+
+  void Visit(ArtMethod* method) OVERRIDE SHARED_REQUIRES(Locks::mutator_lock_) {
+    ArtMethod* const dest = patch_oat_->RelocatedCopyOf(method);
+    patch_oat_->FixupMethod(method, dest);
+  }
+
+ private:
+  PatchOat* const patch_oat_;
+};
 
 void PatchOat::PatchArtMethods(const ImageHeader* image_header) {
   const auto& section = image_header->GetMethodsSection();
   const size_t pointer_size = InstructionSetPointerSize(isa_);
-  size_t method_size = ArtMethod::ObjectSize(pointer_size);
-  for (size_t pos = 0; pos < section.Size(); pos += method_size) {
-    auto* src = reinterpret_cast<ArtMethod*>(heap_->Begin() + section.Offset() + pos);
-    auto* dest = RelocatedCopyOf(src);
-    FixupMethod(src, dest);
-  }
+  PatchOatArtMethodVisitor visitor(this);
+  section.VisitPackedArtMethods(&visitor, heap_->Begin(), pointer_size);
 }
 
 class FixupRootVisitor : public RootVisitor {
@@ -443,7 +497,7 @@ class FixupRootVisitor : public RootVisitor {
   }
 
   void VisitRoots(mirror::Object*** roots, size_t count, const RootInfo& info ATTRIBUTE_UNUSED)
-      OVERRIDE SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+      OVERRIDE SHARED_REQUIRES(Locks::mutator_lock_) {
     for (size_t i = 0; i < count; ++i) {
       *roots[i] = patch_oat_->RelocatedAddressOfPointer(*roots[i]);
     }
@@ -451,7 +505,7 @@ class FixupRootVisitor : public RootVisitor {
 
   void VisitRoots(mirror::CompressedReference<mirror::Object>** roots, size_t count,
                   const RootInfo& info ATTRIBUTE_UNUSED)
-      OVERRIDE SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+      OVERRIDE SHARED_REQUIRES(Locks::mutator_lock_) {
     for (size_t i = 0; i < count; ++i) {
       roots[i]->Assign(patch_oat_->RelocatedAddressOfPointer(roots[i]->AsMirrorPtr()));
     }
@@ -472,41 +526,72 @@ void PatchOat::PatchInternedStrings(const ImageHeader* image_header) {
   temp_table.VisitRoots(&visitor, kVisitRootFlagAllRoots);
 }
 
+class RelocatedPointerVisitor {
+ public:
+  explicit RelocatedPointerVisitor(PatchOat* patch_oat) : patch_oat_(patch_oat) {}
+
+  template <typename T>
+  T* operator()(T* ptr) const {
+    return patch_oat_->RelocatedAddressOfPointer(ptr);
+  }
+
+ private:
+  PatchOat* const patch_oat_;
+};
+
 void PatchOat::PatchDexFileArrays(mirror::ObjectArray<mirror::Object>* img_roots) {
   auto* dex_caches = down_cast<mirror::ObjectArray<mirror::DexCache>*>(
       img_roots->Get(ImageHeader::kDexCaches));
+  const size_t pointer_size = InstructionSetPointerSize(isa_);
   for (size_t i = 0, count = dex_caches->GetLength(); i < count; ++i) {
-    auto* dex_cache = dex_caches->GetWithoutChecks(i);
-    auto* fields = dex_cache->GetResolvedFields();
-    if (fields != nullptr) {
-      CHECK(!fields->IsObjectArray());
-      CHECK(fields->IsArrayInstance());
-      FixupNativePointerArray(fields);
+    auto* orig_dex_cache = dex_caches->GetWithoutChecks(i);
+    auto* copy_dex_cache = RelocatedCopyOf(orig_dex_cache);
+    // Though the DexCache array fields are usually treated as native pointers, we set the full
+    // 64-bit values here, clearing the top 32 bits for 32-bit targets. The zero-extension is
+    // done by casting to the unsigned type uintptr_t before casting to int64_t, i.e.
+    //     static_cast<int64_t>(reinterpret_cast<uintptr_t>(image_begin_ + offset))).
+    GcRoot<mirror::String>* orig_strings = orig_dex_cache->GetStrings();
+    GcRoot<mirror::String>* relocated_strings = RelocatedAddressOfPointer(orig_strings);
+    copy_dex_cache->SetField64<false>(
+        mirror::DexCache::StringsOffset(),
+        static_cast<int64_t>(reinterpret_cast<uintptr_t>(relocated_strings)));
+    if (orig_strings != nullptr) {
+      orig_dex_cache->FixupStrings(RelocatedCopyOf(orig_strings), RelocatedPointerVisitor(this));
     }
-    auto* methods = dex_cache->GetResolvedMethods();
-    if (methods != nullptr) {
-      CHECK(!methods->IsObjectArray());
-      CHECK(methods->IsArrayInstance());
-      FixupNativePointerArray(methods);
+    GcRoot<mirror::Class>* orig_types = orig_dex_cache->GetResolvedTypes();
+    GcRoot<mirror::Class>* relocated_types = RelocatedAddressOfPointer(orig_types);
+    copy_dex_cache->SetField64<false>(
+        mirror::DexCache::ResolvedTypesOffset(),
+        static_cast<int64_t>(reinterpret_cast<uintptr_t>(relocated_types)));
+    if (orig_types != nullptr) {
+      orig_dex_cache->FixupResolvedTypes(RelocatedCopyOf(orig_types),
+                                         RelocatedPointerVisitor(this));
     }
-  }
-}
-
-void PatchOat::FixupNativePointerArray(mirror::PointerArray* object) {
-  if (object->IsIntArray()) {
-    mirror::IntArray* arr = object->AsIntArray();
-    mirror::IntArray* copy_arr = down_cast<mirror::IntArray*>(RelocatedCopyOf(arr));
-    for (size_t j = 0, count2 = arr->GetLength(); j < count2; ++j) {
-      copy_arr->SetWithoutChecks<false>(
-          j, RelocatedAddressOfIntPointer(arr->GetWithoutChecks(j)));
+    ArtMethod** orig_methods = orig_dex_cache->GetResolvedMethods();
+    ArtMethod** relocated_methods = RelocatedAddressOfPointer(orig_methods);
+    copy_dex_cache->SetField64<false>(
+        mirror::DexCache::ResolvedMethodsOffset(),
+        static_cast<int64_t>(reinterpret_cast<uintptr_t>(relocated_methods)));
+    if (orig_methods != nullptr) {
+      ArtMethod** copy_methods = RelocatedCopyOf(orig_methods);
+      for (size_t j = 0, num = orig_dex_cache->NumResolvedMethods(); j != num; ++j) {
+        ArtMethod* orig = mirror::DexCache::GetElementPtrSize(orig_methods, j, pointer_size);
+        ArtMethod* copy = RelocatedAddressOfPointer(orig);
+        mirror::DexCache::SetElementPtrSize(copy_methods, j, copy, pointer_size);
+      }
     }
-  } else {
-    CHECK(object->IsLongArray());
-    mirror::LongArray* arr = object->AsLongArray();
-    mirror::LongArray* copy_arr = down_cast<mirror::LongArray*>(RelocatedCopyOf(arr));
-    for (size_t j = 0, count2 = arr->GetLength(); j < count2; ++j) {
-      copy_arr->SetWithoutChecks<false>(
-          j, RelocatedAddressOfIntPointer(arr->GetWithoutChecks(j)));
+    ArtField** orig_fields = orig_dex_cache->GetResolvedFields();
+    ArtField** relocated_fields = RelocatedAddressOfPointer(orig_fields);
+    copy_dex_cache->SetField64<false>(
+        mirror::DexCache::ResolvedFieldsOffset(),
+        static_cast<int64_t>(reinterpret_cast<uintptr_t>(relocated_fields)));
+    if (orig_fields != nullptr) {
+      ArtField** copy_fields = RelocatedCopyOf(orig_fields);
+      for (size_t j = 0, num = orig_dex_cache->NumResolvedFields(); j != num; ++j) {
+        ArtField* orig = mirror::DexCache::GetElementPtrSize(orig_fields, j, pointer_size);
+        ArtField* copy = RelocatedAddressOfPointer(orig);
+        mirror::DexCache::SetElementPtrSize(copy_fields, j, copy, pointer_size);
+      }
     }
   }
 }
@@ -563,25 +648,6 @@ void PatchOat::PatchVisitor::operator() (mirror::Class* cls ATTRIBUTE_UNUSED,
   copy_->SetFieldObjectWithoutWriteBarrier<false, true, kVerifyNone>(off, moved_object);
 }
 
-const OatHeader* PatchOat::GetOatHeader(const ElfFile* elf_file) {
-  if (elf_file->Is64Bit()) {
-    return GetOatHeader<ElfFileImpl64>(elf_file->GetImpl64());
-  } else {
-    return GetOatHeader<ElfFileImpl32>(elf_file->GetImpl32());
-  }
-}
-
-template <typename ElfFileImpl>
-const OatHeader* PatchOat::GetOatHeader(const ElfFileImpl* elf_file) {
-  auto rodata_sec = elf_file->FindSectionByName(".rodata");
-  if (rodata_sec == nullptr) {
-    return nullptr;
-  }
-
-  OatHeader* oat_header = reinterpret_cast<OatHeader*>(elf_file->Begin() + rodata_sec->sh_offset);
-  return oat_header;
-}
-
 // Called by BitmapCallback
 void PatchOat::VisitObject(mirror::Object* object) {
   mirror::Object* copy = RelocatedCopyOf(object);
@@ -595,18 +661,16 @@ void PatchOat::VisitObject(mirror::Object* object) {
     }
   }
   PatchOat::PatchVisitor visitor(this, copy);
-  object->VisitReferences<true, kVerifyNone>(visitor, visitor);
+  object->VisitReferences<kVerifyNone>(visitor, visitor);
   if (object->IsClass<kVerifyNone>()) {
-    auto* klass = object->AsClass();
-    auto* copy_klass = down_cast<mirror::Class*>(copy);
-    copy_klass->SetSFieldsUnchecked(RelocatedAddressOfPointer(klass->GetSFields()));
-    copy_klass->SetIFieldsUnchecked(RelocatedAddressOfPointer(klass->GetIFields()));
-    copy_klass->SetDirectMethodsPtrUnchecked(
-        RelocatedAddressOfPointer(klass->GetDirectMethodsPtr()));
-    copy_klass->SetVirtualMethodsPtr(RelocatedAddressOfPointer(klass->GetVirtualMethodsPtr()));
+    const size_t pointer_size = InstructionSetPointerSize(isa_);
+    mirror::Class* klass = object->AsClass();
+    mirror::Class* copy_klass = down_cast<mirror::Class*>(copy);
+    RelocatedPointerVisitor native_visitor(this);
+    klass->FixupNativePointers(copy_klass, pointer_size, native_visitor);
     auto* vtable = klass->GetVTable();
     if (vtable != nullptr) {
-      FixupNativePointerArray(vtable);
+      vtable->Fixup(RelocatedCopyOf(vtable), pointer_size, native_visitor);
     }
     auto* iftable = klass->GetIfTable();
     if (iftable != nullptr) {
@@ -614,24 +678,12 @@ void PatchOat::VisitObject(mirror::Object* object) {
         if (iftable->GetMethodArrayCount(i) > 0) {
           auto* method_array = iftable->GetMethodArray(i);
           CHECK(method_array != nullptr);
-          FixupNativePointerArray(method_array);
+          method_array->Fixup(RelocatedCopyOf(method_array), pointer_size, native_visitor);
         }
       }
     }
-    if (klass->ShouldHaveEmbeddedImtAndVTable()) {
-      const size_t pointer_size = InstructionSetPointerSize(isa_);
-      for (int32_t i = 0; i < klass->GetEmbeddedVTableLength(); ++i) {
-        copy_klass->SetEmbeddedVTableEntryUnchecked(i, RelocatedAddressOfPointer(
-            klass->GetEmbeddedVTableEntry(i, pointer_size)), pointer_size);
-      }
-      for (size_t i = 0; i < mirror::Class::kImtSize; ++i) {
-        copy_klass->SetEmbeddedImTableEntry(i, RelocatedAddressOfPointer(
-            klass->GetEmbeddedImTableEntry(i, pointer_size)), pointer_size);
-      }
-    }
-  }
-  if (object->GetClass() == mirror::Method::StaticClass() ||
-      object->GetClass() == mirror::Constructor::StaticClass()) {
+  } else if (object->GetClass() == mirror::Method::StaticClass() ||
+             object->GetClass() == mirror::Constructor::StaticClass()) {
     // Need to go update the ArtMethod.
     auto* dest = down_cast<mirror::AbstractMethod*>(copy);
     auto* src = down_cast<mirror::AbstractMethod*>(object);
@@ -645,12 +697,12 @@ void PatchOat::FixupMethod(ArtMethod* object, ArtMethod* copy) {
   // Just update the entry points if it looks like we should.
   // TODO: sanity check all the pointers' values
   copy->SetDeclaringClass(RelocatedAddressOfPointer(object->GetDeclaringClass()));
-  copy->SetDexCacheResolvedMethods(RelocatedAddressOfPointer(object->GetDexCacheResolvedMethods()));
-  copy->SetDexCacheResolvedTypes(RelocatedAddressOfPointer(object->GetDexCacheResolvedTypes()));
+  copy->SetDexCacheResolvedMethods(
+      RelocatedAddressOfPointer(object->GetDexCacheResolvedMethods(pointer_size)), pointer_size);
+  copy->SetDexCacheResolvedTypes(
+      RelocatedAddressOfPointer(object->GetDexCacheResolvedTypes(pointer_size)), pointer_size);
   copy->SetEntryPointFromQuickCompiledCodePtrSize(RelocatedAddressOfPointer(
       object->GetEntryPointFromQuickCompiledCodePtrSize(pointer_size)), pointer_size);
-  copy->SetEntryPointFromInterpreterPtrSize(RelocatedAddressOfPointer(
-      object->GetEntryPointFromInterpreterPtrSize(pointer_size)), pointer_size);
   copy->SetEntryPointFromJniPtrSize(RelocatedAddressOfPointer(
       object->GetEntryPointFromJniPtrSize(pointer_size)), pointer_size);
 }
@@ -851,11 +903,11 @@ NO_RETURN static void Usage(const char *fmt, ...) {
   UsageError("  --base-offset-delta=<delta>: Specify the amount to change the old base-offset by.");
   UsageError("      This value may be negative.");
   UsageError("");
-  UsageError("  --patched-image-file=<file.art>: Use the same patch delta as was used to patch");
-  UsageError("      the given image file.");
+  UsageError("  --patched-image-file=<file.art>: Relocate the oat file to be the same as the");
+  UsageError("      given image file.");
   UsageError("");
-  UsageError("  --patched-image-location=<file.art>: Use the same patch delta as was used to");
-  UsageError("      patch the given image location. If used one must also specify the");
+  UsageError("  --patched-image-location=<file.art>: Relocate the oat file to be the same as the");
+  UsageError("      image at the given location. If used one must also specify the");
   UsageError("      --instruction-set flag. It will search for this image in the same way that");
   UsageError("      is done when loading one.");
   UsageError("");
@@ -971,6 +1023,7 @@ static int patchoat(int argc, char **argv) {
   bool orig_base_offset_set = false;
   off_t base_delta = 0;
   bool base_delta_set = false;
+  bool match_delta = false;
   std::string patched_image_filename;
   std::string patched_image_location;
   bool dump_timings = kIsDebugBuild;
@@ -1169,7 +1222,11 @@ static int patchoat(int argc, char **argv) {
       base_delta_set = true;
       base_delta = base_offset - orig_base_offset;
     } else if (!patched_image_filename.empty()) {
+      if (have_image_files) {
+        Usage("--patched-image-location should not be used when patching other images");
+      }
       base_delta_set = true;
+      match_delta = true;
       std::string error_msg;
       if (!ReadBaseDelta(patched_image_filename.c_str(), &base_delta, &error_msg)) {
         Usage(error_msg.c_str(), patched_image_filename.c_str());
@@ -1287,6 +1344,32 @@ static int patchoat(int argc, char **argv) {
     return EXIT_FAILURE;
   }
 
+  if (match_delta) {
+    CHECK(!have_image_files);  // We will not do this with images.
+    std::string error_msg;
+    // Figure out what the current delta is so we can match it to the desired delta.
+    std::unique_ptr<ElfFile> elf(ElfFile::Open(input_oat.get(), PROT_READ, MAP_PRIVATE,
+                                               &error_msg));
+    off_t current_delta = 0;
+    if (elf.get() == nullptr) {
+      LOG(ERROR) << "unable to open oat file " << input_oat->GetPath() << " : " << error_msg;
+      cleanup(false);
+      return EXIT_FAILURE;
+    } else if (!ReadOatPatchDelta(elf.get(), &current_delta, &error_msg)) {
+      LOG(ERROR) << "Unable to get current delta: " << error_msg;
+      cleanup(false);
+      return EXIT_FAILURE;
+    }
+    // Before this line base_delta is the desired final delta. We need it to be the actual amount to
+    // change everything by. We subtract the current delta from it to make it this.
+    base_delta -= current_delta;
+    if (!IsAligned<kPageSize>(base_delta)) {
+      LOG(ERROR) << "Given image file was relocated by an illegal delta";
+      cleanup(false);
+      return false;
+    }
+  }
+
   if (debug) {
     LOG(INFO) << "moving offset by " << base_delta
               << " (0x" << std::hex << base_delta << ") bytes or "
@@ -1313,18 +1396,18 @@ static int patchoat(int argc, char **argv) {
                           new_oat_out);
     // The order here doesn't matter. If the first one is successfully saved and the second one
     // erased, ImageSpace will still detect a problem and not use the files.
-    ret = ret && FinishFile(output_image.get(), ret);
-    ret = ret && FinishFile(output_oat.get(), ret);
+    ret = FinishFile(output_image.get(), ret);
+    ret = FinishFile(output_oat.get(), ret);
   } else if (have_oat_files) {
     TimingLogger::ScopedTiming pt("patch oat", &timings);
     ret = PatchOat::Patch(input_oat.get(), base_delta, output_oat.get(), &timings,
                           output_oat_fd >= 0,  // was it opened from FD?
                           new_oat_out);
-    ret = ret && FinishFile(output_oat.get(), ret);
+    ret = FinishFile(output_oat.get(), ret);
   } else if (have_image_files) {
     TimingLogger::ScopedTiming pt("patch image", &timings);
     ret = PatchOat::Patch(input_image_location, base_delta, output_image.get(), isa, &timings);
-    ret = ret && FinishFile(output_image.get(), ret);
+    ret = FinishFile(output_image.get(), ret);
   } else {
     CHECK(false);
     ret = true;

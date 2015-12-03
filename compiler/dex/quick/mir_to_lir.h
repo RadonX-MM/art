@@ -1474,8 +1474,7 @@ class Mir2Lir {
     virtual bool InexpensiveConstantFloat(int32_t value) = 0;
     virtual bool InexpensiveConstantLong(int64_t value) = 0;
     virtual bool InexpensiveConstantDouble(int64_t value) = 0;
-    virtual bool InexpensiveConstantInt(int32_t value, Instruction::Code opcode) {
-      UNUSED(opcode);
+    virtual bool InexpensiveConstantInt(int32_t value, Instruction::Code opcode ATTRIBUTE_UNUSED) {
       return InexpensiveConstantInt(value);
     }
 
@@ -1781,6 +1780,11 @@ class Mir2Lir {
     bool CoreSpillMaskContains(int reg) {
       return (core_spill_mask_ & (1u << reg)) != 0;
     }
+
+    size_t GetCacheOffset(uint32_t index);
+    size_t GetCachePointerOffset(uint32_t index, size_t pointer_size);
+
+    void LoadTypeFromCache(uint32_t type_index, RegStorage class_reg);
 
   public:
     // TODO: add accessors for these.

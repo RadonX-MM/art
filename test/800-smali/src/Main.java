@@ -51,10 +51,12 @@ public class Main {
         testCases = new LinkedList<TestCase>();
         testCases.add(new TestCase("PackedSwitch", "PackedSwitch", "packedSwitch",
                 new Object[]{123}, null, 123));
+        testCases.add(new TestCase("PackedSwitch key INT_MAX", "PackedSwitch",
+                "packedSwitch_INT_MAX", new Object[]{123}, null, 123));
+        testCases.add(new TestCase("PackedSwitch key overflow", "b_24399945",
+                "packedSwitch_overflow", new Object[]{123}, new VerifyError(), null));
 
         testCases.add(new TestCase("b/17790197", "B17790197", "getInt", null, null, 100));
-        testCases.add(new TestCase("b/17978759", "B17978759", "test", null, new VerifyError(),
-                null));
         testCases.add(new TestCase("FloatBadArgReg", "FloatBadArgReg", "getInt",
                 new Object[]{100}, null, 100));
         testCases.add(new TestCase("negLong", "negLong", "negLong", null, null, 122142L));
@@ -81,12 +83,20 @@ public class Main {
                 null));
         testCases.add(new TestCase("b/20224106", "B20224106", "run", null, new VerifyError(),
                 0));
+        testCases.add(new TestCase("b/17410612", "B17410612", "run", null, new VerifyError(),
+                0));
+        testCases.add(new TestCase("b/21863767", "B21863767", "run", null, null,
+                null));
         testCases.add(new TestCase("b/21873167", "B21873167", "test", null, null, null));
         testCases.add(new TestCase("b/21614284", "B21614284", "test", new Object[] { null },
                 new NullPointerException(), null));
         testCases.add(new TestCase("b/21902684", "B21902684", "test", null, null, null));
-        testCases.add(new TestCase("b/21863767", "B21863767", "run", null, null,
-                null));
+        testCases.add(new TestCase("b/22045582", "B22045582", "run", null, new VerifyError(),
+                0));
+        testCases.add(new TestCase("b/22045582 (int)", "B22045582Int", "run", null,
+                new VerifyError(), 0));
+        testCases.add(new TestCase("b/22045582 (wide)", "B22045582Wide", "run", null,
+                new VerifyError(), 0));
         testCases.add(new TestCase("b/21886894", "B21886894", "test", null, new VerifyError(),
                 null));
         testCases.add(new TestCase("b/22080519", "B22080519", "run", null,
@@ -101,6 +111,18 @@ public class Main {
                 new Object[] { false }, null, null));
         testCases.add(new TestCase("b/22331663 (fail)", "B22331663Fail", "run",
                 new Object[] { false }, new VerifyError(), null));
+        testCases.add(new TestCase("b/22411633 (1)", "B22411633_1", "run", new Object[] { false },
+                null, null));
+        testCases.add(new TestCase("b/22411633 (2)", "B22411633_2", "run", new Object[] { false },
+                new VerifyError(), null));
+        testCases.add(new TestCase("b/22411633 (3)", "B22411633_3", "run", new Object[] { false },
+                null, null));
+        testCases.add(new TestCase("b/22411633 (4)", "B22411633_4", "run", new Object[] { false },
+                new VerifyError(), null));
+        testCases.add(new TestCase("b/22411633 (5)", "B22411633_5", "run", new Object[] { false },
+                null, null));
+        testCases.add(new TestCase("b/22777307", "B22777307", "run", null, new InstantiationError(),
+                null));
         testCases.add(new TestCase("b/22881413", "B22881413", "run", null, null, null));
         testCases.add(new TestCase("b/20843113", "B20843113", "run", null, null, null));
         testCases.add(new TestCase("b/23201502 (float)", "B23201502", "runFloat", null,
@@ -109,6 +131,14 @@ public class Main {
                 new NullPointerException(), null));
         testCases.add(new TestCase("b/23300986", "B23300986", "runAliasAfterEnter",
                 new Object[] { new Object() }, null, null));
+        testCases.add(new TestCase("b/23300986 (2)", "B23300986", "runAliasBeforeEnter",
+                new Object[] { new Object() }, null, null));
+        testCases.add(new TestCase("b/23502994 (if-eqz)", "B23502994", "runIF_EQZ",
+                new Object[] { new Object() }, null, null));
+        testCases.add(new TestCase("b/23502994 (check-cast)", "B23502994", "runCHECKCAST",
+                new Object[] { "abc" }, null, null));
+        testCases.add(new TestCase("b/25494456", "B25494456", "run", null, new VerifyError(),
+                null));
     }
 
     public void runTests() {

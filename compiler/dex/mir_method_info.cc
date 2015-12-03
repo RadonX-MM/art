@@ -105,13 +105,15 @@ void MirMethodLoweringInfo::Resolve(CompilerDriver* compiler_driver,
       // Don't devirt if we are in a different dex file since we can't have direct invokes in
       // another dex file unless we always put a direct / patch pointer.
       devirt_target = nullptr;
-      current_dex_cache.Assign(runtime->GetClassLinker()->FindDexCache(*it->target_dex_file_));
+      current_dex_cache.Assign(runtime->GetClassLinker()->FindDexCache(
+          soa.Self(), *it->target_dex_file_));
       CHECK(current_dex_cache.Get() != nullptr);
       DexCompilationUnit cu(
           mUnit->GetCompilationUnit(), mUnit->GetClassLoader(), mUnit->GetClassLinker(),
           *it->target_dex_file_, nullptr /* code_item not used */, 0u /* class_def_idx not used */,
           it->target_method_idx_, 0u /* access_flags not used */,
-          nullptr /* verified_method not used */);
+          nullptr /* verified_method not used */,
+          current_dex_cache);
       resolved_method = compiler_driver->ResolveMethod(soa, current_dex_cache, class_loader, &cu,
                                                        it->target_method_idx_, invoke_type, false);
       if (resolved_method == nullptr) {

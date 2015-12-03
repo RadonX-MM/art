@@ -37,16 +37,28 @@
 #include "driver/compiler_driver.h"
 #include "driver/compiler_options.h"
 #include "elf_writer_quick.h"
+#include "experimental_flags.h"
 #include "jni/quick/jni_compiler.h"
 #include "mir_to_lir.h"
 #include "mirror/object.h"
 #include "runtime.h"
 
 // Specific compiler backends.
+#ifdef ART_ENABLE_CODEGEN_arm
 #include "dex/quick/arm/backend_arm.h"
+#endif
+
+#ifdef ART_ENABLE_CODEGEN_arm64
 #include "dex/quick/arm64/backend_arm64.h"
+#endif
+
+#if defined(ART_ENABLE_CODEGEN_mips) || defined(ART_ENABLE_CODEGEN_mips64)
 #include "dex/quick/mips/backend_mips.h"
+#endif
+
+#if defined(ART_ENABLE_CODEGEN_x86) || defined(ART_ENABLE_CODEGEN_x86_64)
 #include "dex/quick/x86/backend_x86.h"
+#endif
 
 namespace art {
 
@@ -381,13 +393,13 @@ static int kAllOpcodes[] = {
     Instruction::IGET_BYTE_QUICK,
     Instruction::IGET_CHAR_QUICK,
     Instruction::IGET_SHORT_QUICK,
-    Instruction::UNUSED_F3,
+    Instruction::INVOKE_LAMBDA,
     Instruction::UNUSED_F4,
-    Instruction::UNUSED_F5,
-    Instruction::UNUSED_F6,
-    Instruction::UNUSED_F7,
-    Instruction::UNUSED_F8,
-    Instruction::UNUSED_F9,
+    Instruction::CAPTURE_VARIABLE,
+    Instruction::CREATE_LAMBDA,
+    Instruction::LIBERATE_VARIABLE,
+    Instruction::BOX_LAMBDA,
+    Instruction::UNBOX_LAMBDA,
     Instruction::UNUSED_FA,
     Instruction::UNUSED_FB,
     Instruction::UNUSED_FC,
@@ -425,7 +437,15 @@ static int kInvokeOpcodes[] = {
     Instruction::INVOKE_VIRTUAL_RANGE_QUICK,
 };
 
-// Unsupported opcodes. null can be used when everything is supported. Size of the lists is
+// TODO: Add support for lambda opcodes to the quick compiler.
+static const int kUnsupportedLambdaOpcodes[] = {
+    Instruction::INVOKE_LAMBDA,
+    Instruction::CREATE_LAMBDA,
+    Instruction::BOX_LAMBDA,
+    Instruction::UNBOX_LAMBDA,
+};
+
+// Unsupported opcodes. Null can be used when everything is supported. Size of the lists is
 // recorded below.
 static const int* kUnsupportedOpcodes[] = {
     // 0 = kNone.
@@ -433,17 +453,17 @@ static const int* kUnsupportedOpcodes[] = {
     // 1 = kArm, unused (will use kThumb2).
     kAllOpcodes,
     // 2 = kArm64.
-    nullptr,
+    kUnsupportedLambdaOpcodes,
     // 3 = kThumb2.
-    nullptr,
+    kUnsupportedLambdaOpcodes,
     // 4 = kX86.
-    nullptr,
+    kUnsupportedLambdaOpcodes,
     // 5 = kX86_64.
-    nullptr,
+    kUnsupportedLambdaOpcodes,
     // 6 = kMips.
-    nullptr,
+    kUnsupportedLambdaOpcodes,
     // 7 = kMips64.
-    nullptr
+    kUnsupportedLambdaOpcodes,
 };
 static_assert(sizeof(kUnsupportedOpcodes) == 8 * sizeof(int*), "kUnsupportedOpcodes unexpected");
 
@@ -454,20 +474,25 @@ static const size_t kUnsupportedOpcodesSize[] = {
     // 1 = kArm, unused (will use kThumb2).
     arraysize(kAllOpcodes),
     // 2 = kArm64.
-    0,
+    arraysize(kUnsupportedLambdaOpcodes),
     // 3 = kThumb2.
-    0,
+    arraysize(kUnsupportedLambdaOpcodes),
     // 4 = kX86.
-    0,
+    arraysize(kUnsupportedLambdaOpcodes),
     // 5 = kX86_64.
-    0,
+    arraysize(kUnsupportedLambdaOpcodes),
     // 6 = kMips.
-    0,
+    arraysize(kUnsupportedLambdaOpcodes),
     // 7 = kMips64.
-    0
+    arraysize(kUnsupportedLambdaOpcodes),
 };
 static_assert(sizeof(kUnsupportedOpcodesSize) == 8 * sizeof(size_t),
               "kUnsupportedOpcodesSize unexpected");
+
+static bool IsUnsupportedExperimentalLambdasOnly(size_t i) {
+  DCHECK_LE(i, arraysize(kUnsupportedOpcodes));
+  return kUnsupportedOpcodes[i] == kUnsupportedLambdaOpcodes;
+}
 
 // The maximum amount of Dalvik register in a method for which we will start compiling. Tries to
 // avoid an abort when we need to manage more SSA registers than we can.
@@ -491,10 +516,29 @@ static bool CanCompileShorty(const char* shorty, InstructionSet instruction_set)
   return true;
 }
 
-// check certain conditions that we don't want Quick compiler to handle
-bool QuickCompiler::CheckMoreConditions(CompilationUnit*) const
-{
-  return true;
+// If the ISA has unsupported opcodes, should we skip scanning over them?
+//
+// Most of the time we're compiling non-experimental files, so scanning just slows
+// performance down by as much as 6% with 4 threads.
+// In the rare cases we compile experimental opcodes, the runtime has an option to enable it,
+// which will force scanning for any unsupported opcodes.
+static bool SkipScanningUnsupportedOpcodes(InstructionSet instruction_set) {
+  if (UNLIKELY(kUnsupportedOpcodesSize[instruction_set] == 0U)) {
+    // All opcodes are supported no matter what. Usually not the case
+    // since experimental opcodes are not implemented in the quick compiler.
+    return true;
+  } else if (LIKELY(!Runtime::Current()->
+                      AreExperimentalFlagsEnabled(ExperimentalFlags::kLambdas))) {
+    // Experimental opcodes are disabled.
+    //
+    // If all unsupported opcodes are experimental we don't need to do scanning.
+    return IsUnsupportedExperimentalLambdasOnly(instruction_set);
+  } else {
+    // Experimental opcodes are enabled.
+    //
+    // Do the opcode scanning if the ISA has any unsupported opcodes.
+    return false;
+  }
 }
 
 // Skip the method that we do not support currently.
@@ -512,7 +556,7 @@ bool QuickCompiler::CanCompileMethod(uint32_t method_idx, const DexFile& dex_fil
 
   // Check whether we do have limitations at all.
   if (kSupportedTypes[cu->instruction_set] == nullptr &&
-      kUnsupportedOpcodesSize[cu->instruction_set] == 0U) {
+      SkipScanningUnsupportedOpcodes(cu->instruction_set)) {
     return true;
   }
 
@@ -628,7 +672,20 @@ CompiledMethod* QuickCompiler::Compile(const DexFile::CodeItem* code_item,
                                        uint16_t class_def_idx,
                                        uint32_t method_idx,
                                        jobject class_loader,
-                                       const DexFile& dex_file) const {
+                                       const DexFile& dex_file,
+                                       Handle<mirror::DexCache> dex_cache) const {
+  if (kPoisonHeapReferences) {
+    VLOG(compiler) << "Skipping method : " << PrettyMethod(method_idx, dex_file)
+                   << "  Reason = Quick does not support heap poisoning.";
+    return nullptr;
+  }
+
+  if (kEmitCompilerReadBarrier) {
+    VLOG(compiler) << "Skipping method : " << PrettyMethod(method_idx, dex_file)
+                   << "  Reason = Quick does not support read barrier.";
+    return nullptr;
+  }
+
   // TODO: check method fingerprint here to determine appropriate backend type.  Until then, use
   // build default.
   CompilerDriver* driver = GetCompilerDriver();
@@ -638,11 +695,8 @@ CompiledMethod* QuickCompiler::Compile(const DexFile::CodeItem* code_item,
     return nullptr;
   }
 
-  if (driver->GetVerifiedMethod(&dex_file, method_idx)->HasRuntimeThrow()) {
-    return nullptr;
-  }
-
   DCHECK(driver->GetCompilerOptions().IsCompilationEnabled());
+  DCHECK(!driver->GetVerifiedMethod(&dex_file, method_idx)->HasRuntimeThrow());
 
   Runtime* const runtime = Runtime::Current();
   ClassLinker* const class_linker = runtime->GetClassLinker();
@@ -711,7 +765,7 @@ CompiledMethod* QuickCompiler::Compile(const DexFile::CodeItem* code_item,
 
   /* Build the raw MIR graph */
   cu.mir_graph->InlineMethod(code_item, access_flags, invoke_type, class_def_idx, method_idx,
-                             class_loader, dex_file);
+                             class_loader, dex_file, dex_cache);
 
   if (!CanCompileMethod(method_idx, dex_file, &cu)) {
     VLOG(compiler)  << cu.instruction_set << ": Cannot compile method : "
@@ -818,26 +872,46 @@ uintptr_t QuickCompiler::GetEntryPointOf(ArtMethod* method) const {
       InstructionSetPointerSize(GetCompilerDriver()->GetInstructionSet())));
 }
 
-Mir2Lir* QuickCompiler::GetCodeGenerator(CompilationUnit* cu, void* compilation_unit) {
-  UNUSED(compilation_unit);
+Mir2Lir* QuickCompiler::GetCodeGenerator(CompilationUnit* cu,
+                                         void* compilation_unit ATTRIBUTE_UNUSED) {
   Mir2Lir* mir_to_lir = nullptr;
   switch (cu->instruction_set) {
+#ifdef ART_ENABLE_CODEGEN_arm
     case kThumb2:
       mir_to_lir = ArmCodeGenerator(cu, cu->mir_graph.get(), &cu->arena);
       break;
+#endif  // ART_ENABLE_CODEGEN_arm
+#ifdef ART_ENABLE_CODEGEN_arm64
     case kArm64:
       mir_to_lir = Arm64CodeGenerator(cu, cu->mir_graph.get(), &cu->arena);
       break;
+#endif  // ART_ENABLE_CODEGEN_arm64
+#if defined(ART_ENABLE_CODEGEN_mips) || defined(ART_ENABLE_CODEGEN_mips64)
+      // Intentional 2 level ifdef. Want to fail on mips64 if it is not enabled, even if mips is
+      // and vice versa.
+#ifdef ART_ENABLE_CODEGEN_mips
     case kMips:
       // Fall-through.
+#endif  // ART_ENABLE_CODEGEN_mips
+#ifdef ART_ENABLE_CODEGEN_mips64
     case kMips64:
+#endif  // ART_ENABLE_CODEGEN_mips64
       mir_to_lir = MipsCodeGenerator(cu, cu->mir_graph.get(), &cu->arena);
       break;
+#endif  // ART_ENABLE_CODEGEN_mips || ART_ENABLE_CODEGEN_mips64
+#if defined(ART_ENABLE_CODEGEN_x86) || defined(ART_ENABLE_CODEGEN_x86_64)
+      // Intentional 2 level ifdef. Want to fail on x86_64 if it is not enabled, even if x86 is
+      // and vice versa.
+#ifdef ART_ENABLE_CODEGEN_x86
     case kX86:
       // Fall-through.
+#endif  // ART_ENABLE_CODEGEN_x86
+#ifdef ART_ENABLE_CODEGEN_x86_64
     case kX86_64:
+#endif  // ART_ENABLE_CODEGEN_x86_64
       mir_to_lir = X86CodeGenerator(cu, cu->mir_graph.get(), &cu->arena);
       break;
+#endif  // ART_ENABLE_CODEGEN_x86 || ART_ENABLE_CODEGEN_x86_64
     default:
       LOG(FATAL) << "Unexpected instruction set: " << cu->instruction_set;
   }

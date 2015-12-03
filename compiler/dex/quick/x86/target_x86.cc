@@ -31,6 +31,7 @@
 #include "mirror/array-inl.h"
 #include "mirror/string.h"
 #include "oat.h"
+#include "oat_quick_method_header.h"
 #include "x86_lir.h"
 
 namespace art {
@@ -254,8 +255,7 @@ RegStorage X86Mir2Lir::TargetReg32(SpecialTargetRegister reg) const {
                        : RegStorage32FromSpecialTargetRegister_Target32[reg];
 }
 
-RegStorage X86Mir2Lir::TargetReg(SpecialTargetRegister reg) {
-  UNUSED(reg);
+RegStorage X86Mir2Lir::TargetReg(SpecialTargetRegister reg ATTRIBUTE_UNUSED) {
   LOG(FATAL) << "Do not use this function!!!";
   UNREACHABLE();
 }
@@ -861,8 +861,7 @@ Mir2Lir* X86CodeGenerator(CompilationUnit* const cu, MIRGraph* const mir_graph,
 }
 
 // Not used in x86(-64)
-RegStorage X86Mir2Lir::LoadHelper(QuickEntrypointEnum trampoline) {
-  UNUSED(trampoline);
+RegStorage X86Mir2Lir::LoadHelper(QuickEntrypointEnum trampoline ATTRIBUTE_UNUSED) {
   LOG(FATAL) << "Unexpected use of LoadHelper in x86";
   UNREACHABLE();
 }
@@ -2323,13 +2322,11 @@ void X86Mir2Lir::GenSetVector(MIR* mir) {
   }
 }
 
-void X86Mir2Lir::GenPackedArrayGet(BasicBlock* bb, MIR* mir) {
-  UNUSED(bb, mir);
+void X86Mir2Lir::GenPackedArrayGet(BasicBlock* bb ATTRIBUTE_UNUSED, MIR* mir ATTRIBUTE_UNUSED) {
   UNIMPLEMENTED(FATAL) << "Extended opcode kMirOpPackedArrayGet not supported.";
 }
 
-void X86Mir2Lir::GenPackedArrayPut(BasicBlock* bb, MIR* mir) {
-  UNUSED(bb, mir);
+void X86Mir2Lir::GenPackedArrayPut(BasicBlock* bb ATTRIBUTE_UNUSED, MIR* mir ATTRIBUTE_UNUSED) {
   UNIMPLEMENTED(FATAL) << "Extended opcode kMirOpPackedArrayPut not supported.";
 }
 

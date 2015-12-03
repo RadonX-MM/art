@@ -21,6 +21,7 @@
 #include "dex/compiler_ir.h"
 #include "dex/quick/mir_to_lir.h"
 #include "oat.h"
+#include "oat_quick_method_header.h"
 #include "utils.h"
 #include "x86_lir.h"
 
@@ -1629,8 +1630,8 @@ void X86Mir2Lir::EmitUnimplemented(const X86EncodingMap* entry, LIR* lir) {
  * instruction.  In those cases we will try to substitute a new code
  * sequence or request that the trace be shortened and retried.
  */
-AssemblerStatus X86Mir2Lir::AssembleInstructions(LIR* first_lir_insn, CodeOffset start_addr) {
-  UNUSED(start_addr);
+AssemblerStatus X86Mir2Lir::AssembleInstructions(LIR* first_lir_insn,
+                                                 CodeOffset start_addr ATTRIBUTE_UNUSED) {
   LIR *lir;
   AssemblerStatus res = kSuccess;  // Assume success
 

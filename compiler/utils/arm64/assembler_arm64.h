@@ -10,7 +10,7 @@
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
+ * See the License for the specific language governing permissions and
  * limitations under the License.
  */
 
@@ -73,11 +73,12 @@ class Arm64Assembler FINAL : public Assembler {
     delete vixl_masm_;
   }
 
-  // Emit slow paths queued during assembly.
-  void EmitSlowPaths();
+  // Finalize the code.
+  void FinalizeCode() OVERRIDE;
 
   // Size of generated code.
-  size_t CodeSize() const;
+  size_t CodeSize() const OVERRIDE;
+  const uint8_t* CodeBufferBaseAddress() const OVERRIDE;
 
   // Copy instructions out of assembly buffer into the given region of memory.
   void FinalizeInstructions(const MemoryRegion& region);
@@ -115,7 +116,7 @@ class Arm64Assembler FINAL : public Assembler {
   void LoadFromThread64(ManagedRegister dest, ThreadOffset<8> src, size_t size) OVERRIDE;
   void LoadRef(ManagedRegister dest, FrameOffset src) OVERRIDE;
   void LoadRef(ManagedRegister dest, ManagedRegister base, MemberOffset offs,
-               bool poison_reference) OVERRIDE;
+               bool unpoison_reference) OVERRIDE;
   void LoadRawPtr(ManagedRegister dest, ManagedRegister base, Offset offs) OVERRIDE;
   void LoadRawPtrFromThread64(ManagedRegister dest, ThreadOffset<8> offs) OVERRIDE;
 
@@ -181,6 +182,24 @@ class Arm64Assembler FINAL : public Assembler {
   // and branch to a ExceptionSlowPath if it is.
   void ExceptionPoll(ManagedRegister scratch, size_t stack_adjust) OVERRIDE;
 
+  //
+  // Heap poisoning.
+  //
+
+  // Poison a heap reference contained in `reg`.
+  void PoisonHeapReference(vixl::Register reg);
+  // Unpoison a heap reference contained in `reg`.
+  void UnpoisonHeapReference(vixl::Register reg);
+  // Unpoison a heap reference contained in `reg` if heap poisoning is enabled.
+  void MaybeUnpoisonHeapReference(vixl::Register reg);
+
+  void Bind(Label* label ATTRIBUTE_UNUSED) OVERRIDE {
+    UNIMPLEMENTED(FATAL) << "Do not use Bind for ARM64";
+  }
+  void Jump(Label* label ATTRIBUTE_UNUSED) OVERRIDE {
+    UNIMPLEMENTED(FATAL) << "Do not use Jump for ARM64";
+  }
+
  private:
   static vixl::Register reg_x(int code) {
     CHECK(code < kNumberOfXRegisters) << code;
@@ -242,7 +261,7 @@ class Arm64Assembler FINAL : public Assembler {
 
 class Arm64Exception {
  private:
-  explicit Arm64Exception(Arm64ManagedRegister scratch, size_t stack_adjust)
+  Arm64Exception(Arm64ManagedRegister scratch, size_t stack_adjust)
       : scratch_(scratch), stack_adjust_(stack_adjust) {
     }
 

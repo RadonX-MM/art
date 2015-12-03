@@ -28,7 +28,6 @@ namespace art {
 namespace arm {
 
 class CodeGeneratorARM;
-class SlowPathCodeARM;
 
 // Use a local definition to prevent copying mistakes.
 static constexpr size_t kArmWordSize = kArmPointerSize;
@@ -87,13 +86,46 @@ class InvokeDexCallingConventionVisitorARM : public InvokeDexCallingConventionVi
   virtual ~InvokeDexCallingConventionVisitorARM() {}
 
   Location GetNextLocation(Primitive::Type type) OVERRIDE;
-  Location GetReturnLocation(Primitive::Type type);
+  Location GetReturnLocation(Primitive::Type type) const OVERRIDE;
+  Location GetMethodLocation() const OVERRIDE;
 
  private:
   InvokeDexCallingConvention calling_convention;
   uint32_t double_index_ = 0;
 
   DISALLOW_COPY_AND_ASSIGN(InvokeDexCallingConventionVisitorARM);
+};
+
+class FieldAccessCallingConventionARM : public FieldAccessCallingConvention {
+ public:
+  FieldAccessCallingConventionARM() {}
+
+  Location GetObjectLocation() const OVERRIDE {
+    return Location::RegisterLocation(R1);
+  }
+  Location GetFieldIndexLocation() const OVERRIDE {
+    return Location::RegisterLocation(R0);
+  }
+  Location GetReturnLocation(Primitive::Type type) const OVERRIDE {
+    return Primitive::Is64BitType(type)
+        ? Location::RegisterPairLocation(R0, R1)
+        : Location::RegisterLocation(R0);
+  }
+  Location GetSetValueLocation(Primitive::Type type, bool is_instance) const OVERRIDE {
+    return Primitive::Is64BitType(type)
+        ? Location::RegisterPairLocation(R2, R3)
+        : (is_instance
+            ? Location::RegisterLocation(R2)
+            : Location::RegisterLocation(R1));
+  }
+  Location GetFpuLocation(Primitive::Type type) const OVERRIDE {
+    return Primitive::Is64BitType(type)
+        ? Location::FpuRegisterPairLocation(S0, S1)
+        : Location::FpuRegisterLocation(S0);
+  }
+
+ private:
+  DISALLOW_COPY_AND_ASSIGN(FieldAccessCallingConventionARM);
 };
 
 class ParallelMoveResolverARM : public ParallelMoveResolverWithSwap {
@@ -117,38 +149,34 @@ class ParallelMoveResolverARM : public ParallelMoveResolverWithSwap {
   DISALLOW_COPY_AND_ASSIGN(ParallelMoveResolverARM);
 };
 
-class SlowPathCodeARM : public SlowPathCode {
- public:
-  SlowPathCodeARM() : entry_label_(), exit_label_() {}
-
-  Label* GetEntryLabel() { return &entry_label_; }
-  Label* GetExitLabel() { return &exit_label_; }
-
- private:
-  Label entry_label_;
-  Label exit_label_;
-
-  DISALLOW_COPY_AND_ASSIGN(SlowPathCodeARM);
-};
-
 class LocationsBuilderARM : public HGraphVisitor {
  public:
   LocationsBuilderARM(HGraph* graph, CodeGeneratorARM* codegen)
       : HGraphVisitor(graph), codegen_(codegen) {}
 
 #define DECLARE_VISIT_INSTRUCTION(name, super)     \
-  void Visit##name(H##name* instr);
+  void Visit##name(H##name* instr) OVERRIDE;
 
-  FOR_EACH_CONCRETE_INSTRUCTION(DECLARE_VISIT_INSTRUCTION)
+  FOR_EACH_CONCRETE_INSTRUCTION_COMMON(DECLARE_VISIT_INSTRUCTION)
+  FOR_EACH_CONCRETE_INSTRUCTION_ARM(DECLARE_VISIT_INSTRUCTION)
 
 #undef DECLARE_VISIT_INSTRUCTION
 
+  void VisitInstruction(HInstruction* instruction) OVERRIDE {
+    LOG(FATAL) << "Unreachable instruction " << instruction->DebugName()
+               << " (id " << instruction->GetId() << ")";
+  }
+
  private:
   void HandleInvoke(HInvoke* invoke);
-  void HandleBitwiseOperation(HBinaryOperation* operation);
+  void HandleBitwiseOperation(HBinaryOperation* operation, Opcode opcode);
   void HandleShift(HBinaryOperation* operation);
   void HandleFieldSet(HInstruction* instruction, const FieldInfo& field_info);
   void HandleFieldGet(HInstruction* instruction, const FieldInfo& field_info);
+
+  Location ArmEncodableConstantOrRegister(HInstruction* constant, Opcode opcode);
+  bool CanEncodeConstantAsImmediate(HConstant* input_cst, Opcode opcode);
+  bool CanEncodeConstantAsImmediate(uint32_t value, Opcode opcode);
 
   CodeGeneratorARM* const codegen_;
   InvokeDexCallingConventionVisitorARM parameter_visitor_;
@@ -161,11 +189,17 @@ class InstructionCodeGeneratorARM : public HGraphVisitor {
   InstructionCodeGeneratorARM(HGraph* graph, CodeGeneratorARM* codegen);
 
 #define DECLARE_VISIT_INSTRUCTION(name, super)     \
-  void Visit##name(H##name* instr);
+  void Visit##name(H##name* instr) OVERRIDE;
 
-  FOR_EACH_CONCRETE_INSTRUCTION(DECLARE_VISIT_INSTRUCTION)
+  FOR_EACH_CONCRETE_INSTRUCTION_COMMON(DECLARE_VISIT_INSTRUCTION)
+  FOR_EACH_CONCRETE_INSTRUCTION_ARM(DECLARE_VISIT_INSTRUCTION)
 
 #undef DECLARE_VISIT_INSTRUCTION
+
+  void VisitInstruction(HInstruction* instruction) OVERRIDE {
+    LOG(FATAL) << "Unreachable instruction " << instruction->DebugName()
+               << " (id " << instruction->GetId() << ")";
+  }
 
   ArmAssembler* GetAssembler() const { return assembler_; }
 
@@ -174,7 +208,10 @@ class InstructionCodeGeneratorARM : public HGraphVisitor {
   // is the block to branch to if the suspend check is not needed, and after
   // the suspend call.
   void GenerateSuspendCheck(HSuspendCheck* check, HBasicBlock* successor);
-  void GenerateClassInitializationCheck(SlowPathCodeARM* slow_path, Register class_reg);
+  void GenerateClassInitializationCheck(SlowPathCode* slow_path, Register class_reg);
+  void GenerateAndConst(Register out, Register first, uint32_t value);
+  void GenerateOrrConst(Register out, Register first, uint32_t value);
+  void GenerateEorConst(Register out, Register first, uint32_t value);
   void HandleBitwiseOperation(HBinaryOperation* operation);
   void HandleShift(HBinaryOperation* operation);
   void GenerateMemoryBarrier(MemBarrierKind kind);
@@ -184,14 +221,27 @@ class InstructionCodeGeneratorARM : public HGraphVisitor {
                                HInstruction* instruction);
   void GenerateWideAtomicLoad(Register addr, uint32_t offset,
                               Register out_lo, Register out_hi);
-  void HandleFieldSet(HInstruction* instruction, const FieldInfo& field_info);
+  void HandleFieldSet(HInstruction* instruction,
+                      const FieldInfo& field_info,
+                      bool value_can_be_null);
   void HandleFieldGet(HInstruction* instruction, const FieldInfo& field_info);
   void GenerateImplicitNullCheck(HNullCheck* instruction);
   void GenerateExplicitNullCheck(HNullCheck* instruction);
   void GenerateTestAndBranch(HInstruction* instruction,
+                             size_t condition_input_index,
                              Label* true_target,
-                             Label* false_target,
-                             Label* always_true_target);
+                             Label* false_target);
+  void GenerateCompareWithImmediate(Register left, int32_t right);
+  void GenerateCompareTestAndBranch(HCondition* condition,
+                                    Label* true_target,
+                                    Label* false_target);
+  void GenerateFPJumps(HCondition* cond, Label* true_label, Label* false_label);
+  void GenerateLongComparesAndJumps(HCondition* cond, Label* true_label, Label* false_label);
+  void DivRemOneOrMinusOne(HBinaryOperation* instruction);
+  void DivRemByPowerOfTwo(HBinaryOperation* instruction);
+  void GenerateDivRemWithAnyConstant(HBinaryOperation* instruction);
+  void GenerateDivRemConstantIntegral(HBinaryOperation* instruction);
+  void HandleGoto(HInstruction* got, HBasicBlock* successor);
 
   ArmAssembler* const assembler_;
   CodeGeneratorARM* const codegen_;
@@ -203,13 +253,18 @@ class CodeGeneratorARM : public CodeGenerator {
  public:
   CodeGeneratorARM(HGraph* graph,
                    const ArmInstructionSetFeatures& isa_features,
-                   const CompilerOptions& compiler_options);
+                   const CompilerOptions& compiler_options,
+                   OptimizingCompilerStats* stats = nullptr);
   virtual ~CodeGeneratorARM() {}
 
   void GenerateFrameEntry() OVERRIDE;
   void GenerateFrameExit() OVERRIDE;
   void Bind(HBasicBlock* block) OVERRIDE;
   void Move(HInstruction* instruction, Location location, HInstruction* move_for) OVERRIDE;
+  void MoveConstant(Location destination, int32_t value) OVERRIDE;
+  void MoveLocation(Location dst, Location src, Primitive::Type dst_type) OVERRIDE;
+  void AddLocationAsTemp(Location location, LocationSummary* locations) OVERRIDE;
+
   size_t SaveCoreRegister(size_t stack_index, uint32_t reg_id) OVERRIDE;
   size_t RestoreCoreRegister(size_t stack_index, uint32_t reg_id) OVERRIDE;
   size_t SaveFloatingPointRegister(size_t stack_index, uint32_t reg_id) OVERRIDE;
@@ -234,6 +289,10 @@ class CodeGeneratorARM : public CodeGenerator {
 
   ArmAssembler* GetAssembler() OVERRIDE {
     return &assembler_;
+  }
+
+  const ArmAssembler& GetAssembler() const OVERRIDE {
+    return assembler_;
   }
 
   uintptr_t GetAddressOf(HBasicBlock* block) const OVERRIDE {
@@ -265,23 +324,29 @@ class CodeGeneratorARM : public CodeGenerator {
   // Helper method to move a 64bits value between two locations.
   void Move64(Location destination, Location source);
 
-  // Load current method into `reg`.
-  void LoadCurrentMethod(Register reg);
-
   // Generate code to invoke a runtime entry point.
-  void InvokeRuntime(
-      int32_t offset, HInstruction* instruction, uint32_t dex_pc, SlowPathCode* slow_path);
+  void InvokeRuntime(QuickEntrypointEnum entrypoint,
+                     HInstruction* instruction,
+                     uint32_t dex_pc,
+                     SlowPathCode* slow_path) OVERRIDE;
+
+  void InvokeRuntime(int32_t offset,
+                     HInstruction* instruction,
+                     uint32_t dex_pc,
+                     SlowPathCode* slow_path);
 
   // Emit a write barrier.
-  void MarkGCCard(Register temp, Register card, Register object, Register value);
+  void MarkGCCard(Register temp, Register card, Register object, Register value, bool can_be_null);
 
   Label* GetLabelOf(HBasicBlock* block) const {
-    return CommonGetLabelOf<Label>(block_labels_.GetRawStorage(), block);
+    return CommonGetLabelOf<Label>(block_labels_, block);
   }
 
   void Initialize() OVERRIDE {
-    block_labels_.SetSize(GetGraph()->GetBlocks().Size());
+    block_labels_ = CommonInitializeLabels<Label>();
   }
+
+  void Finalize(CodeAllocator* allocator) OVERRIDE;
 
   const ArmInstructionSetFeatures& GetInstructionSetFeatures() const {
     return isa_features_;
@@ -295,17 +360,118 @@ class CodeGeneratorARM : public CodeGenerator {
 
   Label* GetFrameEntryLabel() { return &frame_entry_label_; }
 
-  void GenerateStaticOrDirectCall(HInvokeStaticOrDirect* invoke, Register temp);
+  // Check if the desired_dispatch_info is supported. If it is, return it,
+  // otherwise return a fall-back info that should be used instead.
+  HInvokeStaticOrDirect::DispatchInfo GetSupportedInvokeStaticOrDirectDispatch(
+      const HInvokeStaticOrDirect::DispatchInfo& desired_dispatch_info,
+      MethodReference target_method) OVERRIDE;
+
+  void GenerateStaticOrDirectCall(HInvokeStaticOrDirect* invoke, Location temp) OVERRIDE;
+  void GenerateVirtualCall(HInvokeVirtual* invoke, Location temp) OVERRIDE;
+
+  void MoveFromReturnRegister(Location trg, Primitive::Type type) OVERRIDE;
+
+  void EmitLinkerPatches(ArenaVector<LinkerPatch>* linker_patches) OVERRIDE;
+
+  // The PC-relative base address is loaded with three instructions, MOVW+MOVT
+  // to load the offset to base_reg and then ADD base_reg, PC. The offset is
+  // calculated from the ADD's effective PC, i.e. PC+4 on Thumb2. Though we
+  // currently emit these 3 instructions together, instruction scheduling could
+  // split this sequence apart, so we keep separate labels for each of them.
+  struct DexCacheArraysBaseLabels {
+    DexCacheArraysBaseLabels() = default;
+    DexCacheArraysBaseLabels(DexCacheArraysBaseLabels&& other) = default;
+
+    Label movw_label;
+    Label movt_label;
+    Label add_pc_label;
+  };
+
+  void AddDexCacheArraysBase(HArmDexCacheArraysBase* base) {
+    DexCacheArraysBaseLabels labels;
+    dex_cache_arrays_base_labels_.Put(base, std::move(labels));
+  }
+
+  DexCacheArraysBaseLabels* GetDexCacheArraysBaseLabels(HArmDexCacheArraysBase* base) {
+    auto it = dex_cache_arrays_base_labels_.find(base);
+    DCHECK(it != dex_cache_arrays_base_labels_.end());
+    return &it->second;
+  }
+
+  // Generate a read barrier for a heap reference within `instruction`.
+  //
+  // A read barrier for an object reference read from the heap is
+  // implemented as a call to the artReadBarrierSlow runtime entry
+  // point, which is passed the values in locations `ref`, `obj`, and
+  // `offset`:
+  //
+  //   mirror::Object* artReadBarrierSlow(mirror::Object* ref,
+  //                                      mirror::Object* obj,
+  //                                      uint32_t offset);
+  //
+  // The `out` location contains the value returned by
+  // artReadBarrierSlow.
+  //
+  // When `index` is provided (i.e. for array accesses), the offset
+  // value passed to artReadBarrierSlow is adjusted to take `index`
+  // into account.
+  void GenerateReadBarrier(HInstruction* instruction,
+                           Location out,
+                           Location ref,
+                           Location obj,
+                           uint32_t offset,
+                           Location index = Location::NoLocation());
+
+  // If read barriers are enabled, generate a read barrier for a heap reference.
+  // If heap poisoning is enabled, also unpoison the reference in `out`.
+  void MaybeGenerateReadBarrier(HInstruction* instruction,
+                                Location out,
+                                Location ref,
+                                Location obj,
+                                uint32_t offset,
+                                Location index = Location::NoLocation());
+
+  // Generate a read barrier for a GC root within `instruction`.
+  //
+  // A read barrier for an object reference GC root is implemented as
+  // a call to the artReadBarrierForRootSlow runtime entry point,
+  // which is passed the value in location `root`:
+  //
+  //   mirror::Object* artReadBarrierForRootSlow(GcRoot<mirror::Object>* root);
+  //
+  // The `out` location contains the value returned by
+  // artReadBarrierForRootSlow.
+  void GenerateReadBarrierForRoot(HInstruction* instruction, Location out, Location root);
 
  private:
+  Register GetInvokeStaticOrDirectExtraParameter(HInvokeStaticOrDirect* invoke, Register temp);
+
+  using MethodToLiteralMap = ArenaSafeMap<MethodReference, Literal*, MethodReferenceComparator>;
+  using DexCacheArraysBaseToLabelsMap = ArenaSafeMap<HArmDexCacheArraysBase*,
+                                                     DexCacheArraysBaseLabels,
+                                                     std::less<HArmDexCacheArraysBase*>>;
+
+  Literal* DeduplicateMethodLiteral(MethodReference target_method, MethodToLiteralMap* map);
+  Literal* DeduplicateMethodAddressLiteral(MethodReference target_method);
+  Literal* DeduplicateMethodCodeLiteral(MethodReference target_method);
+
   // Labels for each block that will be compiled.
-  GrowableArray<Label> block_labels_;
+  Label* block_labels_;  // Indexed by block id.
   Label frame_entry_label_;
   LocationsBuilderARM location_builder_;
   InstructionCodeGeneratorARM instruction_visitor_;
   ParallelMoveResolverARM move_resolver_;
   Thumb2Assembler assembler_;
   const ArmInstructionSetFeatures& isa_features_;
+
+  // Method patch info, map MethodReference to a literal for method address and method code.
+  MethodToLiteralMap method_patches_;
+  MethodToLiteralMap call_patches_;
+  // Relative call patch info.
+  // Using ArenaDeque<> which retains element addresses on push/emplace_back().
+  ArenaDeque<MethodPatchInfo<Label>> relative_call_patches_;
+
+  DexCacheArraysBaseToLabelsMap dex_cache_arrays_base_labels_;
 
   DISALLOW_COPY_AND_ASSIGN(CodeGeneratorARM);
 };

@@ -18,19 +18,34 @@
 
 #include <memory>
 
-#include <valgrind.h>
-
-#include "gtest/gtest.h"
+#include "common_runtime_test.h"
+#include "base/memory_tool.h"
+#include "base/unix_file/fd_file.h"
 
 namespace art {
 
-class MemMapTest : public testing::Test {
+class MemMapTest : public CommonRuntimeTest {
  public:
   static uint8_t* BaseBegin(MemMap* mem_map) {
     return reinterpret_cast<uint8_t*>(mem_map->base_begin_);
   }
+
   static size_t BaseSize(MemMap* mem_map) {
     return mem_map->base_size_;
+  }
+
+  static uint8_t* GetValidMapAddress(size_t size, bool low_4gb) {
+    // Find a valid map address and unmap it before returning.
+    std::string error_msg;
+    std::unique_ptr<MemMap> map(MemMap::MapAnonymous("temp",
+                                                     nullptr,
+                                                     size,
+                                                     PROT_READ,
+                                                     low_4gb,
+                                                     false,
+                                                     &error_msg));
+    CHECK(map != nullptr);
+    return map->Begin();
   }
 
   static void RemapAtEndTest(bool low_4gb) {
@@ -164,14 +179,36 @@ TEST_F(MemMapTest, MapAnonymousEmpty32bit) {
   ASSERT_TRUE(error_msg.empty());
   ASSERT_LT(reinterpret_cast<uintptr_t>(BaseBegin(map.get())), 1ULL << 32);
 }
+TEST_F(MemMapTest, MapFile32Bit) {
+  CommonInit();
+  std::string error_msg;
+  ScratchFile scratch_file;
+  constexpr size_t kMapSize = kPageSize;
+  std::unique_ptr<uint8_t[]> data(new uint8_t[kMapSize]());
+  ASSERT_TRUE(scratch_file.GetFile()->WriteFully(&data[0], kMapSize));
+  std::unique_ptr<MemMap> map(MemMap::MapFile(/*byte_count*/kMapSize,
+                                              PROT_READ,
+                                              MAP_PRIVATE,
+                                              scratch_file.GetFd(),
+                                              /*start*/0,
+                                              /*low_4gb*/true,
+                                              scratch_file.GetFilename().c_str(),
+                                              &error_msg));
+  ASSERT_TRUE(map != nullptr) << error_msg;
+  ASSERT_TRUE(error_msg.empty());
+  ASSERT_EQ(map->Size(), kMapSize);
+  ASSERT_LT(reinterpret_cast<uintptr_t>(BaseBegin(map.get())), 1ULL << 32);
+}
 #endif
 
 TEST_F(MemMapTest, MapAnonymousExactAddr) {
   CommonInit();
   std::string error_msg;
+  // Find a valid address.
+  uint8_t* valid_address = GetValidMapAddress(kPageSize, /*low_4gb*/false);
   // Map at an address that should work, which should succeed.
   std::unique_ptr<MemMap> map0(MemMap::MapAnonymous("MapAnonymous0",
-                                                    reinterpret_cast<uint8_t*>(ART_BASE_ADDRESS),
+                                                    valid_address,
                                                     kPageSize,
                                                     PROT_READ | PROT_WRITE,
                                                     false,
@@ -179,7 +216,7 @@ TEST_F(MemMapTest, MapAnonymousExactAddr) {
                                                     &error_msg));
   ASSERT_TRUE(map0.get() != nullptr) << error_msg;
   ASSERT_TRUE(error_msg.empty());
-  ASSERT_TRUE(map0->BaseBegin() == reinterpret_cast<void*>(ART_BASE_ADDRESS));
+  ASSERT_TRUE(map0->BaseBegin() == valid_address);
   // Map at an unspecified address, which should succeed.
   std::unique_ptr<MemMap> map1(MemMap::MapAnonymous("MapAnonymous1",
                                                     nullptr,
@@ -216,19 +253,28 @@ TEST_F(MemMapTest, RemapAtEnd32bit) {
 TEST_F(MemMapTest, MapAnonymousExactAddr32bitHighAddr) {
   CommonInit();
   // This test may not work under valgrind.
-  if (RUNNING_ON_VALGRIND == 0) {
-    uintptr_t start_addr = ART_BASE_ADDRESS + 0x1000000;
+  if (RUNNING_ON_MEMORY_TOOL == 0) {
+    constexpr size_t size = 0x100000;
+    // Try all addresses starting from 2GB to 4GB.
+    size_t start_addr = 2 * GB;
     std::string error_msg;
-    std::unique_ptr<MemMap> map(MemMap::MapAnonymous("MapAnonymousExactAddr32bitHighAddr",
-                                                     reinterpret_cast<uint8_t*>(start_addr),
-                                                     0x21000000,
-                                                     PROT_READ | PROT_WRITE,
-                                                     true,
-                                                     false,
-                                                     &error_msg));
+    std::unique_ptr<MemMap> map;
+    for (; start_addr <= std::numeric_limits<uint32_t>::max() - size; start_addr += size) {
+      map.reset(MemMap::MapAnonymous("MapAnonymousExactAddr32bitHighAddr",
+                                     reinterpret_cast<uint8_t*>(start_addr),
+                                     size,
+                                     PROT_READ | PROT_WRITE,
+                                     /*low_4gb*/true,
+                                     false,
+                                     &error_msg));
+      if (map != nullptr) {
+        break;
+      }
+    }
+    ASSERT_GE(reinterpret_cast<uintptr_t>(map->End()), 2u * GB);
     ASSERT_TRUE(map.get() != nullptr) << error_msg;
     ASSERT_TRUE(error_msg.empty());
-    ASSERT_EQ(reinterpret_cast<uintptr_t>(BaseBegin(map.get())), start_addr);
+    ASSERT_EQ(BaseBegin(map.get()), reinterpret_cast<void*>(start_addr));
   }
 }
 

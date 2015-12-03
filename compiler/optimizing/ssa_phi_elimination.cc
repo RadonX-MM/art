@@ -16,6 +16,8 @@
 
 #include "ssa_phi_elimination.h"
 
+#include "base/arena_containers.h"
+
 namespace art {
 
 void SsaDeadPhiElimination::Run() {
@@ -24,33 +26,51 @@ void SsaDeadPhiElimination::Run() {
 }
 
 void SsaDeadPhiElimination::MarkDeadPhis() {
+  // Phis are constructed live and should not be revived if previously marked
+  // dead. This algorithm temporarily breaks that invariant but we DCHECK that
+  // only phis which were initially live are revived.
+  ArenaSet<HPhi*> initially_live(graph_->GetArena()->Adapter());
+
   // Add to the worklist phis referenced by non-phi instructions.
   for (HReversePostOrderIterator it(*graph_); !it.Done(); it.Advance()) {
     HBasicBlock* block = it.Current();
     for (HInstructionIterator inst_it(block->GetPhis()); !inst_it.Done(); inst_it.Advance()) {
       HPhi* phi = inst_it.Current()->AsPhi();
-      // Set dead ahead of running through uses. The phi may have no use.
-      phi->SetDead();
+      if (phi->IsDead()) {
+        continue;
+      }
+
+      bool has_non_phi_use = false;
       for (HUseIterator<HInstruction*> use_it(phi->GetUses()); !use_it.Done(); use_it.Advance()) {
-        HUseListNode<HInstruction*>* current = use_it.Current();
-        HInstruction* user = current->GetUser();
-        if (!user->IsPhi()) {
-          worklist_.Add(phi);
-          phi->SetLive();
+        if (!use_it.Current()->GetUser()->IsPhi()) {
+          has_non_phi_use = true;
           break;
+        }
+      }
+
+      if (has_non_phi_use) {
+        worklist_.push_back(phi);
+      } else {
+        phi->SetDead();
+        if (kIsDebugBuild) {
+          initially_live.insert(phi);
         }
       }
     }
   }
 
   // Process the worklist by propagating liveness to phi inputs.
-  while (!worklist_.IsEmpty()) {
-    HPhi* phi = worklist_.Pop();
+  while (!worklist_.empty()) {
+    HPhi* phi = worklist_.back();
+    worklist_.pop_back();
     for (HInputIterator it(phi); !it.Done(); it.Advance()) {
-      HInstruction* input = it.Current();
-      if (input->IsPhi() && input->AsPhi()->IsDead()) {
-        worklist_.Add(input->AsPhi());
-        input->AsPhi()->SetLive();
+      HPhi* input = it.Current()->AsPhi();
+      if (input != nullptr && input->IsDead()) {
+        // Input is a dead phi. Revive it and add to the worklist. We make sure
+        // that the phi was not dead initially (see definition of `initially_live`).
+        DCHECK(ContainsElement(initially_live, input));
+        input->SetLive();
+        worklist_.push_back(input);
       }
     }
   }
@@ -98,19 +118,26 @@ void SsaDeadPhiElimination::EliminateDeadPhis() {
 }
 
 void SsaRedundantPhiElimination::Run() {
-  // Add all phis in the worklist.
+  // Add all phis in the worklist. Order does not matter for correctness, and
+  // neither will necessarily converge faster.
   for (HReversePostOrderIterator it(*graph_); !it.Done(); it.Advance()) {
     HBasicBlock* block = it.Current();
     for (HInstructionIterator inst_it(block->GetPhis()); !inst_it.Done(); inst_it.Advance()) {
-      worklist_.Add(inst_it.Current()->AsPhi());
+      worklist_.push_back(inst_it.Current()->AsPhi());
     }
   }
 
-  while (!worklist_.IsEmpty()) {
-    HPhi* phi = worklist_.Pop();
+  while (!worklist_.empty()) {
+    HPhi* phi = worklist_.back();
+    worklist_.pop_back();
 
     // If the phi has already been processed, continue.
     if (!phi->IsInBlock()) {
+      continue;
+    }
+
+    if (phi->InputCount() == 0) {
+      DCHECK(phi->IsDead());
       continue;
     }
 
@@ -137,18 +164,21 @@ void SsaRedundantPhiElimination::Run() {
       continue;
     }
 
-    if (phi->IsInLoop()) {
-      // Because we're updating the users of this phi, we may have new
-      // phis candidate for elimination if this phi is in a loop. Add phis that
-      // used this phi to the worklist.
-      for (HUseIterator<HInstruction*> it(phi->GetUses()); !it.Done(); it.Advance()) {
-        HUseListNode<HInstruction*>* current = it.Current();
-        HInstruction* user = current->GetUser();
-        if (user->IsPhi()) {
-          worklist_.Add(user->AsPhi());
-        }
+    // The candidate may not dominate a phi in a catch block.
+    if (phi->IsCatchPhi() && !candidate->StrictlyDominates(phi)) {
+      continue;
+    }
+
+    // Because we're updating the users of this phi, we may have new candidates
+    // for elimination. Add phis that use this phi to the worklist.
+    for (HUseIterator<HInstruction*> it(phi->GetUses()); !it.Done(); it.Advance()) {
+      HUseListNode<HInstruction*>* current = it.Current();
+      HInstruction* user = current->GetUser();
+      if (user->IsPhi()) {
+        worklist_.push_back(user->AsPhi());
       }
     }
+
     phi->ReplaceWith(candidate);
     phi->GetBlock()->RemovePhi(phi);
   }

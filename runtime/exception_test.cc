@@ -26,6 +26,7 @@
 #include "mirror/object_array-inl.h"
 #include "mirror/object-inl.h"
 #include "mirror/stack_trace_element.h"
+#include "oat_quick_method_header.h"
 #include "runtime.h"
 #include "scoped_thread_state_change.h"
 #include "handle_scope-inl.h"
@@ -91,10 +92,25 @@ class ExceptionTest : public CommonRuntimeTest {
     fake_header_code_and_maps_.insert(fake_header_code_and_maps_.end(),
                                       fake_code_.begin(), fake_code_.end());
 
-    // NOTE: Don't align the code (it will not be executed) but check that the Thumb2
-    // adjustment will be a NOP, see ArtMethod::EntryPointToCodePointer().
-    CHECK_EQ(mapping_table_offset & 1u, 0u);
-    const uint8_t* code_ptr = &fake_header_code_and_maps_[gc_map_offset];
+    // Align the code.
+    const size_t alignment = GetInstructionSetAlignment(kRuntimeISA);
+    fake_header_code_and_maps_.reserve(fake_header_code_and_maps_.size() + alignment);
+    const void* unaligned_code_ptr =
+        fake_header_code_and_maps_.data() + (fake_header_code_and_maps_.size() - code_size);
+    size_t offset = dchecked_integral_cast<size_t>(reinterpret_cast<uintptr_t>(unaligned_code_ptr));
+    size_t padding = RoundUp(offset, alignment) - offset;
+    // Make sure no resizing takes place.
+    CHECK_GE(fake_header_code_and_maps_.capacity(), fake_header_code_and_maps_.size() + padding);
+    fake_header_code_and_maps_.insert(fake_header_code_and_maps_.begin(), padding, 0);
+    const void* code_ptr = reinterpret_cast<const uint8_t*>(unaligned_code_ptr) + padding;
+    CHECK_EQ(code_ptr,
+             static_cast<const void*>(fake_header_code_and_maps_.data() +
+                                          (fake_header_code_and_maps_.size() - code_size)));
+
+    if (kRuntimeISA == kArm) {
+      // Check that the Thumb2 adjustment will be a NOP, see EntryPointToCodePointer().
+      CHECK_ALIGNED(mapping_table_offset, 2);
+    }
 
     method_f_ = my_klass_->FindVirtualMethod("f", "()I", sizeof(void*));
     ASSERT_TRUE(method_f_ != nullptr);
@@ -108,8 +124,8 @@ class ExceptionTest : public CommonRuntimeTest {
   const DexFile* dex_;
 
   std::vector<uint8_t> fake_code_;
-  Leb128EncodingVector fake_mapping_data_;
-  Leb128EncodingVector fake_vmap_table_data_;
+  Leb128EncodingVector<> fake_mapping_data_;
+  Leb128EncodingVector<> fake_vmap_table_data_;
   std::vector<uint8_t> fake_gc_map_;
   std::vector<uint8_t> fake_header_code_and_maps_;
 
@@ -169,7 +185,7 @@ TEST_F(ExceptionTest, StackTraceElement) {
   r->SetInstructionSet(kRuntimeISA);
   ArtMethod* save_method = r->CreateCalleeSaveMethod();
   r->SetCalleeSaveMethod(save_method, Runtime::kSaveAll);
-  QuickMethodFrameInfo frame_info = save_method->GetQuickFrameInfo();
+  QuickMethodFrameInfo frame_info = r->GetRuntimeMethodFrameInfo(save_method);
 
   ASSERT_EQ(kStackAlignment, 16U);
   // ASSERT_EQ(sizeof(uintptr_t), sizeof(uint32_t));
@@ -186,13 +202,15 @@ TEST_F(ExceptionTest, StackTraceElement) {
     fake_stack.push_back(0);
   }
 
-  fake_stack.push_back(method_g_->ToNativeQuickPc(dex_pc));  // return pc
+  fake_stack.push_back(method_g_->GetOatQuickMethodHeader(0)->ToNativeQuickPc(
+      method_g_, dex_pc, /* is_catch_handler */ false));  // return pc
 
   // Create/push fake 16byte stack frame for method g
   fake_stack.push_back(reinterpret_cast<uintptr_t>(method_g_));
   fake_stack.push_back(0);
   fake_stack.push_back(0);
-  fake_stack.push_back(method_f_->ToNativeQuickPc(dex_pc));  // return pc
+  fake_stack.push_back(method_g_->GetOatQuickMethodHeader(0)->ToNativeQuickPc(
+      method_g_, dex_pc, /* is_catch_handler */ false));  // return pc
 
   // Create/push fake 16byte stack frame for method f
   fake_stack.push_back(reinterpret_cast<uintptr_t>(method_f_));

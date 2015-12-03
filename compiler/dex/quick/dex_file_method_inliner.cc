@@ -38,6 +38,10 @@ static constexpr bool kIntrinsicIsStatic[] = {
     true,   // kIntrinsicFloatCvt
     true,   // kIntrinsicReverseBits
     true,   // kIntrinsicReverseBytes
+    true,   // kIntrinsicNumberOfLeadingZeros
+    true,   // kIntrinsicNumberOfTrailingZeros
+    true,   // kIntrinsicRotateRight
+    true,   // kIntrinsicRotateLeft
     true,   // kIntrinsicAbsInt
     true,   // kIntrinsicAbsLong
     true,   // kIntrinsicAbsFloat
@@ -55,6 +59,7 @@ static constexpr bool kIntrinsicIsStatic[] = {
     false,  // kIntrinsicReferenceGetReferent
     false,  // kIntrinsicCharAt
     false,  // kIntrinsicCompareTo
+    false,  // kIntrinsicEquals
     false,  // kIntrinsicGetCharsNoCheck
     false,  // kIntrinsicIsEmptyOrLength
     false,  // kIntrinsicIndexOf
@@ -68,6 +73,7 @@ static constexpr bool kIntrinsicIsStatic[] = {
     false,  // kIntrinsicUnsafeGet
     false,  // kIntrinsicUnsafePut
     true,   // kIntrinsicSystemArrayCopyCharArray
+    true,   // kIntrinsicSystemArrayCopy
 };
 static_assert(arraysize(kIntrinsicIsStatic) == kInlineOpNop,
               "arraysize of kIntrinsicIsStatic unexpected");
@@ -75,6 +81,12 @@ static_assert(kIntrinsicIsStatic[kIntrinsicDoubleCvt], "DoubleCvt must be static
 static_assert(kIntrinsicIsStatic[kIntrinsicFloatCvt], "FloatCvt must be static");
 static_assert(kIntrinsicIsStatic[kIntrinsicReverseBits], "ReverseBits must be static");
 static_assert(kIntrinsicIsStatic[kIntrinsicReverseBytes], "ReverseBytes must be static");
+static_assert(kIntrinsicIsStatic[kIntrinsicNumberOfLeadingZeros],
+              "NumberOfLeadingZeros must be static");
+static_assert(kIntrinsicIsStatic[kIntrinsicNumberOfTrailingZeros],
+              "NumberOfTrailingZeros must be static");
+static_assert(kIntrinsicIsStatic[kIntrinsicRotateRight], "RotateRight must be static");
+static_assert(kIntrinsicIsStatic[kIntrinsicRotateLeft], "RotateLeft must be static");
 static_assert(kIntrinsicIsStatic[kIntrinsicAbsInt], "AbsInt must be static");
 static_assert(kIntrinsicIsStatic[kIntrinsicAbsLong], "AbsLong must be static");
 static_assert(kIntrinsicIsStatic[kIntrinsicAbsFloat], "AbsFloat must be static");
@@ -92,6 +104,7 @@ static_assert(kIntrinsicIsStatic[kIntrinsicRoundDouble], "RoundDouble must be st
 static_assert(!kIntrinsicIsStatic[kIntrinsicReferenceGetReferent], "Get must not be static");
 static_assert(!kIntrinsicIsStatic[kIntrinsicCharAt], "CharAt must not be static");
 static_assert(!kIntrinsicIsStatic[kIntrinsicCompareTo], "CompareTo must not be static");
+static_assert(!kIntrinsicIsStatic[kIntrinsicEquals], "String equals must not be static");
 static_assert(!kIntrinsicIsStatic[kIntrinsicGetCharsNoCheck], "GetCharsNoCheck must not be static");
 static_assert(!kIntrinsicIsStatic[kIntrinsicIsEmptyOrLength], "IsEmptyOrLength must not be static");
 static_assert(!kIntrinsicIsStatic[kIntrinsicIndexOf], "IndexOf must not be static");
@@ -109,6 +122,8 @@ static_assert(!kIntrinsicIsStatic[kIntrinsicUnsafeGet], "UnsafeGet_must_not_be_s
 static_assert(!kIntrinsicIsStatic[kIntrinsicUnsafePut], "UnsafePut must not be static");
 static_assert(kIntrinsicIsStatic[kIntrinsicSystemArrayCopyCharArray],
               "SystemArrayCopyCharArray must be static");
+static_assert(kIntrinsicIsStatic[kIntrinsicSystemArrayCopy],
+              "SystemArrayCopy must be static");
 
 MIR* AllocReplacementMIR(MIRGraph* mir_graph, MIR* invoke) {
   MIR* insn = mir_graph->NewMIR();
@@ -189,6 +204,7 @@ const char* const DexFileMethodInliner::kNameCacheNames[] = {
     "getReferent",           // kNameCacheReferenceGet
     "charAt",                // kNameCacheCharAt
     "compareTo",             // kNameCacheCompareTo
+    "equals",                // kNameCacheEquals
     "getCharsNoCheck",       // kNameCacheGetCharsNoCheck
     "isEmpty",               // kNameCacheIsEmpty
     "indexOf",               // kNameCacheIndexOf
@@ -225,6 +241,10 @@ const char* const DexFileMethodInliner::kNameCacheNames[] = {
     "putObjectVolatile",     // kNameCachePutObjectVolatile
     "putOrderedObject",      // kNameCachePutOrderedObject
     "arraycopy",             // kNameCacheArrayCopy
+    "numberOfLeadingZeros",  // kNameCacheNumberOfLeadingZeros
+    "numberOfTrailingZeros",  // kNameCacheNumberOfTrailingZeros
+    "rotateRight",           // kNameCacheRotateRight
+    "rotateLeft",            // kNameCacheRotateLeft
 };
 
 const DexFileMethodInliner::ProtoDef DexFileMethodInliner::kProtoCacheDefs[] = {
@@ -280,6 +300,10 @@ const DexFileMethodInliner::ProtoDef DexFileMethodInliner::kProtoCacheDefs[] = {
     { kClassCacheVoid, 2, { kClassCacheLong, kClassCacheLong } },
     // kProtoCacheJS_V
     { kClassCacheVoid, 2, { kClassCacheLong, kClassCacheShort } },
+    // kProtoCacheObject_Z
+    { kClassCacheBoolean, 1, { kClassCacheJavaLangObject } },
+    // kProtoCacheJI_J
+    { kClassCacheLong, 2, { kClassCacheLong, kClassCacheInt } },
     // kProtoCacheObjectJII_Z
     { kClassCacheBoolean, 4, { kClassCacheJavaLangObject, kClassCacheLong,
         kClassCacheInt, kClassCacheInt } },
@@ -305,6 +329,9 @@ const DexFileMethodInliner::ProtoDef DexFileMethodInliner::kProtoCacheDefs[] = {
     // kProtoCacheCharArrayICharArrayII_V
     { kClassCacheVoid, 5, {kClassCacheJavaLangCharArray, kClassCacheInt,
         kClassCacheJavaLangCharArray, kClassCacheInt, kClassCacheInt} },
+    // kProtoCacheObjectIObjectII_V
+    { kClassCacheVoid, 5, {kClassCacheJavaLangObject, kClassCacheInt,
+        kClassCacheJavaLangObject, kClassCacheInt, kClassCacheInt} },
     // kProtoCacheIICharArrayI_V
     { kClassCacheVoid, 4, { kClassCacheInt, kClassCacheInt, kClassCacheJavaLangCharArray,
         kClassCacheInt } },
@@ -368,6 +395,11 @@ const DexFileMethodInliner::IntrinsicDef DexFileMethodInliner::kIntrinsicMethods
     INTRINSIC(JavaLangInteger, Reverse, I_I, kIntrinsicReverseBits, k32),
     INTRINSIC(JavaLangLong, Reverse, J_J, kIntrinsicReverseBits, k64),
 
+    INTRINSIC(JavaLangInteger, NumberOfLeadingZeros, I_I, kIntrinsicNumberOfLeadingZeros, k32),
+    INTRINSIC(JavaLangLong, NumberOfLeadingZeros, J_I, kIntrinsicNumberOfLeadingZeros, k64),
+    INTRINSIC(JavaLangInteger, NumberOfTrailingZeros, I_I, kIntrinsicNumberOfTrailingZeros, k32),
+    INTRINSIC(JavaLangLong, NumberOfTrailingZeros, J_I, kIntrinsicNumberOfTrailingZeros, k64),
+
     INTRINSIC(JavaLangMath,       Abs, I_I, kIntrinsicAbsInt, 0),
     INTRINSIC(JavaLangStrictMath, Abs, I_I, kIntrinsicAbsInt, 0),
     INTRINSIC(JavaLangMath,       Abs, J_J, kIntrinsicAbsLong, 0),
@@ -411,6 +443,7 @@ const DexFileMethodInliner::IntrinsicDef DexFileMethodInliner::kIntrinsicMethods
 
     INTRINSIC(JavaLangString, CharAt, I_C, kIntrinsicCharAt, 0),
     INTRINSIC(JavaLangString, CompareTo, String_I, kIntrinsicCompareTo, 0),
+    INTRINSIC(JavaLangString, Equals, Object_Z, kIntrinsicEquals, 0),
     INTRINSIC(JavaLangString, GetCharsNoCheck, IICharArrayI_V, kIntrinsicGetCharsNoCheck, 0),
     INTRINSIC(JavaLangString, IsEmpty, _Z, kIntrinsicIsEmptyOrLength, kIntrinsicFlagIsEmpty),
     INTRINSIC(JavaLangString, IndexOf, II_I, kIntrinsicIndexOf, kIntrinsicFlagNone),
@@ -454,6 +487,13 @@ const DexFileMethodInliner::IntrinsicDef DexFileMethodInliner::kIntrinsicMethods
 
     INTRINSIC(JavaLangSystem, ArrayCopy, CharArrayICharArrayII_V , kIntrinsicSystemArrayCopyCharArray,
               0),
+    INTRINSIC(JavaLangSystem, ArrayCopy, ObjectIObjectII_V , kIntrinsicSystemArrayCopy,
+              0),
+
+    INTRINSIC(JavaLangInteger, RotateRight, II_I, kIntrinsicRotateRight, k32),
+    INTRINSIC(JavaLangLong, RotateRight, JI_J, kIntrinsicRotateRight, k64),
+    INTRINSIC(JavaLangInteger, RotateLeft, II_I, kIntrinsicRotateLeft, k32),
+    INTRINSIC(JavaLangLong, RotateLeft, JI_J, kIntrinsicRotateLeft, k64),
 
 #undef INTRINSIC
 
@@ -581,6 +621,9 @@ bool DexFileMethodInliner::GenIntrinsic(Mir2Lir* backend, CallInfo* info) {
       return backend->GenInlinedCharAt(info);
     case kIntrinsicCompareTo:
       return backend->GenInlinedStringCompareTo(info);
+    case kIntrinsicEquals:
+      // Quick does not implement this intrinsic.
+      return false;
     case kIntrinsicGetCharsNoCheck:
       return backend->GenInlinedStringGetCharsNoCheck(info);
     case kIntrinsicIsEmptyOrLength:
@@ -614,6 +657,12 @@ bool DexFileMethodInliner::GenIntrinsic(Mir2Lir* backend, CallInfo* info) {
                                           intrinsic.d.data & kIntrinsicFlagIsOrdered);
     case kIntrinsicSystemArrayCopyCharArray:
       return backend->GenInlinedArrayCopyCharArray(info);
+    case kIntrinsicNumberOfLeadingZeros:
+    case kIntrinsicNumberOfTrailingZeros:
+    case kIntrinsicRotateRight:
+    case kIntrinsicRotateLeft:
+    case kIntrinsicSystemArrayCopy:
+      return false;   // not implemented in quick.
     default:
       LOG(FATAL) << "Unexpected intrinsic opcode: " << intrinsic.opcode;
       return false;  // avoid warning "control reaches end of non-void function"
@@ -707,14 +756,7 @@ uint32_t DexFileMethodInliner::FindClassIndex(const DexFile* dex_file, IndexCach
     return *class_index;
   }
 
-  const DexFile::StringId* string_id = dex_file->FindStringId(kClassCacheNames[index]);
-  if (string_id == nullptr) {
-    *class_index = kIndexNotFound;
-    return *class_index;
-  }
-  uint32_t string_index = dex_file->GetIndexForStringId(*string_id);
-
-  const DexFile::TypeId* type_id = dex_file->FindTypeId(string_index);
+  const DexFile::TypeId* type_id = dex_file->FindTypeId(kClassCacheNames[index]);
   if (type_id == nullptr) {
     *class_index = kIndexNotFound;
     return *class_index;

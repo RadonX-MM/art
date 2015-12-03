@@ -58,10 +58,7 @@ static int32_t ChooseRelocationOffsetDelta(int32_t min_delta, int32_t max_delta)
   CHECK_ALIGNED(max_delta, kPageSize);
   CHECK_LT(min_delta, max_delta);
 
-  std::default_random_engine generator;
-  generator.seed(NanoTime() * getpid());
-  std::uniform_int_distribution<int32_t> distribution(min_delta, max_delta);
-  int32_t r = distribution(generator);
+  int32_t r = GetRandomNumber<int32_t>(min_delta, max_delta);
   if (r % 2 == 0) {
     r = RoundUp(r, kPageSize);
   } else {
@@ -709,19 +706,32 @@ ImageSpace* ImageSpace::Init(const char* image_filename, const char* image_locat
   }
 
   // Note: The image header is part of the image due to mmap page alignment required of offset.
-  std::unique_ptr<MemMap> map(MemMap::MapFileAtAddress(
-      image_header.GetImageBegin(), image_header.GetImageSize(),
-      PROT_READ | PROT_WRITE, MAP_PRIVATE, file->Fd(), 0, false, image_filename, error_msg));
-  if (map.get() == nullptr) {
+  std::unique_ptr<MemMap> map(MemMap::MapFileAtAddress(image_header.GetImageBegin(),
+                                                       image_header.GetImageSize(),
+                                                       PROT_READ | PROT_WRITE,
+                                                       MAP_PRIVATE,
+                                                       file->Fd(),
+                                                       0,
+                                                       /*low_4gb*/false,
+                                                       /*reuse*/false,
+                                                       image_filename,
+                                                       error_msg));
+  if (map == nullptr) {
     DCHECK(!error_msg->empty());
     return nullptr;
   }
   CHECK_EQ(image_header.GetImageBegin(), map->Begin());
   DCHECK_EQ(0, memcmp(&image_header, map->Begin(), sizeof(ImageHeader)));
 
-  std::unique_ptr<MemMap> image_map(MemMap::MapFileAtAddress(
-      nullptr, bitmap_section.Size(), PROT_READ, MAP_PRIVATE, file->Fd(),
-      bitmap_section.Offset(), false, image_filename, error_msg));
+  std::unique_ptr<MemMap> image_map(MemMap::MapFileAtAddress(nullptr,
+                                                             bitmap_section.Size(),
+                                                             PROT_READ, MAP_PRIVATE,
+                                                             file->Fd(),
+                                                             bitmap_section.Offset(),
+                                                             /*low_4gb*/false,
+                                                             /*reuse*/false,
+                                                             image_filename,
+                                                             error_msg));
   if (image_map.get() == nullptr) {
     *error_msg = StringPrintf("Failed to map image bitmap: %s", error_msg->c_str());
     return nullptr;
@@ -789,10 +799,13 @@ OatFile* ImageSpace::OpenOatFile(const char* image_path, std::string* error_msg)
 
   CHECK(image_header.GetOatDataBegin() != nullptr);
 
-  OatFile* oat_file = OatFile::Open(oat_filename, oat_filename, image_header.GetOatDataBegin(),
+  OatFile* oat_file = OatFile::Open(oat_filename,
+                                    oat_filename,
+                                    image_header.GetOatDataBegin(),
                                     image_header.GetOatFileBegin(),
                                     !Runtime::Current()->IsAotCompiler(),
-                                    nullptr, error_msg);
+                                    nullptr,
+                                    error_msg);
   if (oat_file == nullptr) {
     *error_msg = StringPrintf("Failed to open oat file '%s' referenced from image %s: %s",
                               oat_filename.c_str(), GetName(), error_msg->c_str());
@@ -839,15 +852,13 @@ bool ImageSpace::ValidateOatFile(std::string* error_msg) const {
   return true;
 }
 
-
 const OatFile* ImageSpace::GetOatFile() const {
   return oat_file_non_owned_;
 }
 
-
-OatFile* ImageSpace::ReleaseOatFile() {
-  CHECK(oat_file_.get() != nullptr);
-  return oat_file_.release();
+std::unique_ptr<const OatFile> ImageSpace::ReleaseOatFile() {
+  CHECK(oat_file_ != nullptr);
+  return std::move(oat_file_);
 }
 
 void ImageSpace::Dump(std::ostream& os) const {

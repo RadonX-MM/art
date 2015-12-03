@@ -16,7 +16,13 @@
 
 #include "mir_to_lir-inl.h"
 
+// Mac does not provide endian.h, so we'll use byte order agnostic code.
+#ifndef __APPLE__
+#include <endian.h>
+#endif
+
 #include "base/bit_vector-inl.h"
+#include "base/stringprintf.h"
 #include "dex/mir_graph.h"
 #include "driver/compiler_driver.h"
 #include "driver/compiler_options.h"
@@ -841,7 +847,7 @@ void Mir2Lir::CreateNativeGcMap() {
         references_buffer[i] = static_cast<uint8_t>(
             raw_storage[i / sizeof(raw_storage[0])] >> (8u * (i % sizeof(raw_storage[0]))));
       }
-      native_gc_map_builder.AddEntry(native_offset, &references_buffer[0]);
+      native_gc_map_builder.AddEntry(native_offset, references_buffer.data());
       prev_mir = mir;
     }
   }
@@ -987,8 +993,7 @@ void Mir2Lir::DumpPackedSwitchTable(const uint16_t* table) {
 }
 
 /* Set up special LIR to mark a Dalvik byte-code instruction start for pretty printing */
-void Mir2Lir::MarkBoundary(DexOffset offset, const char* inst_str) {
-  UNUSED(offset);
+void Mir2Lir::MarkBoundary(DexOffset offset ATTRIBUTE_UNUSED, const char* inst_str) {
   // NOTE: only used for debug listings.
   NewLIR1(kPseudoDalvikByteCodeBoundary, WrapPointer(ArenaStrdup(inst_str)));
 }
@@ -1115,7 +1120,7 @@ void Mir2Lir::Materialize() {
 
 CompiledMethod* Mir2Lir::GetCompiledMethod() {
   // Combine vmap tables - core regs, then fp regs - into vmap_table.
-  Leb128EncodingVector vmap_encoder;
+  Leb128EncodingVector<> vmap_encoder;
   if (frame_size_ > 0) {
     // Prefix the encoded data with its size.
     size_t size = core_vmap_table_.size() + 1 /* marker */ + fp_vmap_table_.size();
@@ -1126,7 +1131,7 @@ CompiledMethod* Mir2Lir::GetCompiledMethod() {
     for (size_t i = 0 ; i < core_vmap_table_.size(); ++i) {
       // Copy, stripping out the phys register sort key.
       vmap_encoder.PushBackUnsigned(
-          ~(-1 << VREG_NUM_WIDTH) & (core_vmap_table_[i] + VmapTable::kEntryAdjustment));
+          ~(~0u << VREG_NUM_WIDTH) & (core_vmap_table_[i] + VmapTable::kEntryAdjustment));
     }
     // Push a marker to take place of lr.
     vmap_encoder.PushBackUnsigned(VmapTable::kAdjustedFpMarker);
@@ -1141,7 +1146,7 @@ CompiledMethod* Mir2Lir::GetCompiledMethod() {
       for (size_t i = 0 ; i < fp_vmap_table_.size(); ++i) {
         // Copy, stripping out the phys register sort key.
         vmap_encoder.PushBackUnsigned(
-            ~(-1 << VREG_NUM_WIDTH) & (fp_vmap_table_[i] + VmapTable::kEntryAdjustment));
+            ~(~0u << VREG_NUM_WIDTH) & (fp_vmap_table_[i] + VmapTable::kEntryAdjustment));
       }
     }
   } else {
@@ -1152,7 +1157,7 @@ CompiledMethod* Mir2Lir::GetCompiledMethod() {
     vmap_encoder.PushBackUnsigned(0u);  // Size is 0.
   }
 
-  // Sort patches by literal offset for better deduplication.
+  // Sort patches by literal offset. Required for .oat_patches encoding.
   std::sort(patches_.begin(), patches_.end(), [](const LinkerPatch& lhs, const LinkerPatch& rhs) {
     return lhs.LiteralOffset() < rhs.LiteralOffset();
   });
@@ -1161,7 +1166,7 @@ CompiledMethod* Mir2Lir::GetCompiledMethod() {
       cu_->compiler_driver, cu_->instruction_set,
       ArrayRef<const uint8_t>(code_buffer_),
       frame_size_, core_spill_mask_, fp_spill_mask_,
-      &src_mapping_table_,
+      ArrayRef<const SrcMapElem>(src_mapping_table_),
       ArrayRef<const uint8_t>(encoded_mapping_table_),
       ArrayRef<const uint8_t>(vmap_encoder.GetData()),
       ArrayRef<const uint8_t>(native_gc_map_),
@@ -1353,8 +1358,8 @@ RegLocation Mir2Lir::NarrowRegLoc(RegLocation loc) {
   return loc;
 }
 
-void Mir2Lir::GenMachineSpecificExtendedMethodMIR(BasicBlock* bb, MIR* mir) {
-  UNUSED(bb, mir);
+void Mir2Lir::GenMachineSpecificExtendedMethodMIR(BasicBlock* bb ATTRIBUTE_UNUSED,
+                                                  MIR* mir ATTRIBUTE_UNUSED) {
   LOG(FATAL) << "Unknown MIR opcode not supported on this architecture";
   UNREACHABLE();
 }

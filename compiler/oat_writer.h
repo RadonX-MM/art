@@ -24,8 +24,8 @@
 #include "linker/relative_patcher.h"  // For linker::RelativePatcherTargetProvider.
 #include "mem_map.h"
 #include "method_reference.h"
-#include "oat.h"
 #include "mirror/class.h"
+#include "oat.h"
 #include "safe_map.h"
 
 namespace art {
@@ -36,6 +36,11 @@ class CompilerDriver;
 class ImageWriter;
 class OutputStream;
 class TimingLogger;
+class TypeLookupTable;
+
+namespace dwarf {
+struct MethodDebugInfo;
+}  // namespace dwarf
 
 // OatHeader         variable length with count of D OatDexFiles
 //
@@ -48,6 +53,11 @@ class TimingLogger;
 // Dex[1]            these are literal copies of the input .dex files.
 // ...
 // Dex[D]
+//
+// TypeLookupTable[0] one descriptor to class def index hash table for each OatDexFile.
+// TypeLookupTable[1]
+// ...
+// TypeLookupTable[D]
 //
 // OatClass[0]       one variable sized OatClass for each of C DexFile::ClassDefs
 // OatClass[1]       contains OatClass entries with class status, offsets to code, etc.
@@ -87,8 +97,20 @@ class OatWriter {
             int32_t image_patch_delta,
             const CompilerDriver* compiler,
             ImageWriter* image_writer,
+            bool compiling_boot_image,
             TimingLogger* timings,
             SafeMap<std::string, std::string>* key_value_store);
+
+  // Returns whether the oat file has an associated image.
+  bool HasImage() const {
+    // Since the image is being created at the same time as the oat file,
+    // check if there's an image writer.
+    return image_writer_ != nullptr;
+  }
+
+  bool HasBootImage() const {
+    return compiling_boot_image_;
+  }
 
   const OatHeader& GetOatHeader() const {
     return *oat_header_;
@@ -111,19 +133,7 @@ class OatWriter {
 
   ~OatWriter();
 
-  struct DebugInfo {
-    const DexFile* dex_file_;
-    size_t class_def_index_;
-    uint32_t dex_method_index_;
-    uint32_t access_flags_;
-    const DexFile::CodeItem *code_item_;
-    bool deduped_;
-    uint32_t low_pc_;
-    uint32_t high_pc_;
-    CompiledMethod* compiled_method_;
-  };
-
-  const std::vector<DebugInfo>& GetMethodDebugInfo() const {
+  const std::vector<dwarf::MethodDebugInfo>& GetMethodDebugInfo() const {
     return method_info_;
   }
 
@@ -161,15 +171,17 @@ class OatWriter {
 
   size_t InitOatHeader();
   size_t InitOatDexFiles(size_t offset);
+  size_t InitLookupTables(size_t offset);
   size_t InitDexFiles(size_t offset);
   size_t InitOatClasses(size_t offset);
   size_t InitOatMaps(size_t offset);
   size_t InitOatCode(size_t offset)
-      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+      SHARED_REQUIRES(Locks::mutator_lock_);
   size_t InitOatCodeDexFiles(size_t offset)
-      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+      SHARED_REQUIRES(Locks::mutator_lock_);
 
   bool WriteTables(OutputStream* out, const size_t file_offset);
+  bool WriteLookupTables(OutputStream* out, const size_t file_offset);
   size_t WriteMaps(OutputStream* out, const size_t file_offset, size_t relative_offset);
   size_t WriteCode(OutputStream* out, const size_t file_offset, size_t relative_offset);
   size_t WriteCodeDexFiles(OutputStream* out, const size_t file_offset, size_t relative_offset);
@@ -178,7 +190,7 @@ class OatWriter {
 
   class OatDexFile {
    public:
-    explicit OatDexFile(size_t offset, const DexFile& dex_file);
+    OatDexFile(size_t offset, const DexFile& dex_file);
     size_t SizeOf() const;
     void UpdateChecksum(OatHeader* oat_header) const;
     bool Write(OatWriter* oat_writer, OutputStream* out, const size_t file_offset) const;
@@ -192,6 +204,8 @@ class OatWriter {
     const uint8_t* dex_file_location_data_;
     uint32_t dex_file_location_checksum_;
     uint32_t dex_file_offset_;
+    uint32_t lookup_table_offset_;
+    TypeLookupTable* lookup_table_;  // Owned by the dex file.
     std::vector<uint32_t> methods_offsets_;
 
    private:
@@ -200,10 +214,10 @@ class OatWriter {
 
   class OatClass {
    public:
-    explicit OatClass(size_t offset,
-                      const std::vector<CompiledMethod*>& compiled_methods,
-                      uint32_t num_non_null_compiled_methods,
-                      mirror::Class::Status status);
+    OatClass(size_t offset,
+             const std::vector<CompiledMethod*>& compiled_methods,
+             uint32_t num_non_null_compiled_methods,
+             mirror::Class::Status status);
     ~OatClass();
     size_t GetOatMethodOffsetsOffsetFromOatHeader(size_t class_def_method_index_) const;
     size_t GetOatMethodOffsetsOffsetFromOatClass(size_t class_def_method_index_) const;
@@ -258,10 +272,11 @@ class OatWriter {
     DISALLOW_COPY_AND_ASSIGN(OatClass);
   };
 
-  std::vector<DebugInfo> method_info_;
+  std::vector<dwarf::MethodDebugInfo> method_info_;
 
   const CompilerDriver* const compiler_driver_;
   ImageWriter* const image_writer_;
+  const bool compiling_boot_image_;
 
   // note OatFile does not take ownership of the DexFiles
   const std::vector<const DexFile*>* dex_files_;
@@ -271,6 +286,10 @@ class OatWriter {
 
   // The size of the required .bss section holding the DexCache data.
   size_t bss_size_;
+
+  // Offsets of the dex cache arrays for each app dex file. For the
+  // boot image, this information is provided by the ImageWriter.
+  SafeMap<const DexFile*, size_t> dex_cache_arrays_offsets_;  // DexFiles not owned.
 
   // Offset of the oat data from the start of the mmapped region of the elf file.
   size_t oat_data_offset_;
@@ -285,8 +304,6 @@ class OatWriter {
   OatHeader* oat_header_;
   std::vector<OatDexFile*> oat_dex_files_;
   std::vector<OatClass*> oat_classes_;
-  std::unique_ptr<const std::vector<uint8_t>> interpreter_to_interpreter_bridge_;
-  std::unique_ptr<const std::vector<uint8_t>> interpreter_to_compiled_code_bridge_;
   std::unique_ptr<const std::vector<uint8_t>> jni_dlsym_lookup_;
   std::unique_ptr<const std::vector<uint8_t>> quick_generic_jni_trampoline_;
   std::unique_ptr<const std::vector<uint8_t>> quick_imt_conflict_trampoline_;
@@ -324,6 +341,9 @@ class OatWriter {
   uint32_t size_oat_class_status_;
   uint32_t size_oat_class_method_bitmaps_;
   uint32_t size_oat_class_method_offsets_;
+  uint32_t size_oat_lookup_table_alignment_;
+  uint32_t size_oat_lookup_table_offset_;
+  uint32_t size_oat_lookup_table_;
 
   std::unique_ptr<linker::RelativePatcher> relative_patcher_;
 

@@ -41,7 +41,7 @@ struct Backtrace {
  public:
   explicit Backtrace(void* raw_context) : raw_context_(raw_context) {}
   void Dump(std::ostream& os) const {
-    DumpNativeStack(os, GetTid(), "\t", nullptr, raw_context_);
+    DumpNativeStack(os, GetTid(), nullptr, "\t", nullptr, raw_context_);
   }
  private:
   // Stores the context of the signal that was unexpected and will terminate the runtime. The
@@ -340,6 +340,9 @@ void HandleUnexpectedSignal(int signal_number, siginfo_t* info, void* raw_contex
                       << "Thread: " << tid << " \"" << thread_name << "\"\n"
                       << "Registers:\n" << Dumpable<UContext>(thread_context) << "\n"
                       << "Backtrace:\n" << Dumpable<Backtrace>(thread_backtrace);
+  if (kIsDebugBuild && signal_number == SIGSEGV) {
+    PrintFileToLog("/proc/self/maps", LogSeverity::INTERNAL_FATAL);
+  }
   Runtime* runtime = Runtime::Current();
   if (runtime != nullptr) {
     if (IsTimeoutSignal(signal_number)) {

@@ -57,8 +57,7 @@ LIR* X86Mir2Lir::OpFpRegCopy(RegStorage r_dest, RegStorage r_src) {
   return res;
 }
 
-bool X86Mir2Lir::InexpensiveConstantInt(int32_t value) {
-  UNUSED(value);
+bool X86Mir2Lir::InexpensiveConstantInt(int32_t value ATTRIBUTE_UNUSED) {
   return true;
 }
 
@@ -66,8 +65,7 @@ bool X86Mir2Lir::InexpensiveConstantFloat(int32_t value) {
   return value == 0;
 }
 
-bool X86Mir2Lir::InexpensiveConstantLong(int64_t value) {
-  UNUSED(value);
+bool X86Mir2Lir::InexpensiveConstantLong(int64_t value ATTRIBUTE_UNUSED) {
   return true;
 }
 
@@ -659,7 +657,7 @@ LIR* X86Mir2Lir::LoadBaseIndexedDisp(RegStorage r_base, RegStorage r_index, int 
         opcode = is_array ? kX86Mov32RA  : kX86Mov32RM;
       }
       // TODO: double store is to unaligned address
-      DCHECK_EQ((displacement & 0x3), 0);
+      DCHECK_ALIGNED(displacement, 4);
       break;
     case kWord:
       if (cu_->target64) {
@@ -677,15 +675,15 @@ LIR* X86Mir2Lir::LoadBaseIndexedDisp(RegStorage r_base, RegStorage r_index, int 
         opcode = is_array ? kX86MovssRA : kX86MovssRM;
         DCHECK(r_dest.IsFloat());
       }
-      DCHECK_EQ((displacement & 0x3), 0);
+      DCHECK_ALIGNED(displacement, 4);
       break;
     case kUnsignedHalf:
       opcode = is_array ? kX86Movzx16RA : kX86Movzx16RM;
-      DCHECK_EQ((displacement & 0x1), 0);
+      DCHECK_ALIGNED(displacement, 2);
       break;
     case kSignedHalf:
       opcode = is_array ? kX86Movsx16RA : kX86Movsx16RM;
-      DCHECK_EQ((displacement & 0x1), 0);
+      DCHECK_ALIGNED(displacement, 2);
       break;
     case kUnsignedByte:
       opcode = is_array ? kX86Movzx8RA : kX86Movzx8RM;
@@ -812,7 +810,7 @@ LIR* X86Mir2Lir::StoreBaseIndexedDisp(RegStorage r_base, RegStorage r_index, int
         opcode = is_array ? kX86Mov32AR  : kX86Mov32MR;
       }
       // TODO: double store is to unaligned address
-      DCHECK_EQ((displacement & 0x3), 0);
+      DCHECK_ALIGNED(displacement, 4);
       break;
     case kWord:
       if (cu_->target64) {
@@ -831,13 +829,13 @@ LIR* X86Mir2Lir::StoreBaseIndexedDisp(RegStorage r_base, RegStorage r_index, int
         opcode = is_array ? kX86MovssAR : kX86MovssMR;
         DCHECK(r_src.IsSingle());
       }
-      DCHECK_EQ((displacement & 0x3), 0);
+      DCHECK_ALIGNED(displacement, 4);
       consider_non_temporal = true;
       break;
     case kUnsignedHalf:
     case kSignedHalf:
       opcode = is_array ? kX86Mov16AR : kX86Mov16MR;
-      DCHECK_EQ((displacement & 0x1), 0);
+      DCHECK_ALIGNED(displacement, 2);
       break;
     case kUnsignedByte:
     case kSignedByte:
@@ -942,9 +940,14 @@ LIR* X86Mir2Lir::StoreBaseDisp(RegStorage r_base, int displacement, RegStorage r
   return store;
 }
 
-LIR* X86Mir2Lir::OpCmpMemImmBranch(ConditionCode cond, RegStorage temp_reg, RegStorage base_reg,
-                                   int offset, int check_value, LIR* target, LIR** compare) {
-  UNUSED(temp_reg);  // Comparison performed directly with memory.
+LIR* X86Mir2Lir::OpCmpMemImmBranch(ConditionCode cond,
+                                   // Comparison performed directly with memory.
+                                   RegStorage temp_reg ATTRIBUTE_UNUSED,
+                                   RegStorage base_reg,
+                                   int offset,
+                                   int check_value,
+                                   LIR* target,
+                                   LIR** compare) {
   LIR* inst = NewLIR3(IS_SIMM8(check_value) ? kX86Cmp32MI8 : kX86Cmp32MI, base_reg.GetReg(),
       offset, check_value);
   if (compare != nullptr) {
@@ -1114,8 +1117,11 @@ RegLocation X86Mir2Lir::UpdateLocWideTyped(RegLocation loc) {
   return loc;
 }
 
-LIR* X86Mir2Lir::InvokeTrampoline(OpKind op, RegStorage r_tgt, QuickEntrypointEnum trampoline) {
-  UNUSED(r_tgt);  // Call to absolute memory location doesn't need a temporary target register.
+LIR* X86Mir2Lir::InvokeTrampoline(OpKind op,
+                                  // Call to absolute memory location doesn't
+                                  // need a temporary target register.
+                                  RegStorage r_tgt ATTRIBUTE_UNUSED,
+                                  QuickEntrypointEnum trampoline) {
   if (cu_->target64) {
     return OpThreadMem(op, GetThreadOffset<8>(trampoline));
   } else {

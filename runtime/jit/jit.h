@@ -26,6 +26,7 @@
 #include "gc_root.h"
 #include "jni.h"
 #include "object_callbacks.h"
+#include "offline_profiling_info.h"
 #include "thread_pool.h"
 
 namespace art {
@@ -43,13 +44,14 @@ class JitOptions;
 class Jit {
  public:
   static constexpr bool kStressMode = kIsDebugBuild;
-  static constexpr size_t kDefaultCompileThreshold = kStressMode ? 1 : 1000;
+  static constexpr size_t kDefaultCompileThreshold = kStressMode ? 2 : 500;
+  static constexpr size_t kDefaultWarmupThreshold = kDefaultCompileThreshold / 2;
 
   virtual ~Jit();
   static Jit* Create(JitOptions* options, std::string* error_msg);
   bool CompileMethod(ArtMethod* method, Thread* self)
-      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-  void CreateInstrumentationCache(size_t compile_threshold);
+      SHARED_REQUIRES(Locks::mutator_lock_);
+  void CreateInstrumentationCache(size_t compile_threshold, size_t warmup_threshold);
   void CreateThreadPool();
   CompilerCallbacks* GetCompilerCallbacks() {
     return compiler_callbacks_;
@@ -66,6 +68,11 @@ class Jit {
   void DumpInfo(std::ostream& os);
   // Add a timing logger to cumulative_timings_.
   void AddTimingLogger(const TimingLogger& logger);
+  JitInstrumentationCache* GetInstrumentationCache() const {
+    return instrumentation_cache_.get();
+  }
+
+  void SaveProfilingInfo(const std::string& filename);
 
  private:
   Jit();
@@ -86,6 +93,7 @@ class Jit {
   std::unique_ptr<jit::JitCodeCache> code_cache_;
   CompilerCallbacks* compiler_callbacks_;  // Owned by the jit compiler.
 
+  std::unique_ptr<OfflineProfilingInfo> offline_profile_info_;
   DISALLOW_COPY_AND_ASSIGN(Jit);
 };
 
@@ -95,11 +103,20 @@ class JitOptions {
   size_t GetCompileThreshold() const {
     return compile_threshold_;
   }
-  size_t GetCodeCacheCapacity() const {
-    return code_cache_capacity_;
+  size_t GetWarmupThreshold() const {
+    return warmup_threshold_;
+  }
+  size_t GetCodeCacheInitialCapacity() const {
+    return code_cache_initial_capacity_;
+  }
+  size_t GetCodeCacheMaxCapacity() const {
+    return code_cache_max_capacity_;
   }
   bool DumpJitInfoOnShutdown() const {
     return dump_info_on_shutdown_;
+  }
+  bool GetSaveProfilingInfo() const {
+    return save_profiling_info_;
   }
   bool UseJIT() const {
     return use_jit_;
@@ -107,15 +124,26 @@ class JitOptions {
   void SetUseJIT(bool b) {
     use_jit_ = b;
   }
+  void SetSaveProfilingInfo(bool b) {
+    save_profiling_info_ = b;
+  }
 
  private:
   bool use_jit_;
-  size_t code_cache_capacity_;
+  size_t code_cache_initial_capacity_;
+  size_t code_cache_max_capacity_;
   size_t compile_threshold_;
+  size_t warmup_threshold_;
   bool dump_info_on_shutdown_;
+  bool save_profiling_info_;
 
-  JitOptions() : use_jit_(false), code_cache_capacity_(0), compile_threshold_(0),
-      dump_info_on_shutdown_(false) { }
+  JitOptions()
+      : use_jit_(false),
+        code_cache_initial_capacity_(0),
+        code_cache_max_capacity_(0),
+        compile_threshold_(0),
+        dump_info_on_shutdown_(false),
+        save_profiling_info_(false) { }
 
   DISALLOW_COPY_AND_ASSIGN(JitOptions);
 };

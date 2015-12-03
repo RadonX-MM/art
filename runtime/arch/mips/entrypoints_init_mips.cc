@@ -15,7 +15,6 @@
  */
 
 #include "atomic.h"
-#include "entrypoints/interpreter/interpreter_entrypoints.h"
 #include "entrypoints/jni/jni_entrypoints.h"
 #include "entrypoints/quick/quick_alloc_entrypoints.h"
 #include "entrypoints/quick/quick_default_externs.h"
@@ -59,12 +58,7 @@ extern "C" double fmod(double a, double b);     // REM_DOUBLE[_2ADDR]
 extern "C" int64_t __divdi3(int64_t, int64_t);
 extern "C" int64_t __moddi3(int64_t, int64_t);
 
-void InitEntryPoints(InterpreterEntryPoints* ipoints, JniEntryPoints* jpoints,
-                     QuickEntryPoints* qpoints) {
-  // Interpreter
-  ipoints->pInterpreterToInterpreterBridge = artInterpreterToInterpreterBridge;
-  ipoints->pInterpreterToCompiledCodeBridge = artInterpreterToCompiledCodeBridge;
-
+void InitEntryPoints(JniEntryPoints* jpoints, QuickEntryPoints* qpoints) {
   // JNI
   jpoints->pDlsymLookup = art_jni_dlsym_lookup_stub;
 
@@ -267,8 +261,8 @@ void InitEntryPoints(InterpreterEntryPoints* ipoints, JniEntryPoints* jpoints,
   qpoints->pThrowStackOverflow = art_quick_throw_stack_overflow;
   static_assert(!IsDirectEntrypoint(kQuickThrowStackOverflow), "Non-direct C stub marked direct.");
 
-  // Deoptimize
-  qpoints->pDeoptimize = art_quick_deoptimize;
+  // Deoptimization from compiled code.
+  qpoints->pDeoptimize = art_quick_deoptimize_from_compiled_code;
   static_assert(!IsDirectEntrypoint(kQuickDeoptimize), "Non-direct C stub marked direct.");
 
   // Atomic 64-bit load/store
@@ -277,8 +271,14 @@ void InitEntryPoints(InterpreterEntryPoints* ipoints, JniEntryPoints* jpoints,
   qpoints->pA64Store = QuasiAtomic::Write64;
   static_assert(IsDirectEntrypoint(kQuickA64Store), "Non-direct C stub marked direct.");
 
+  // Read barrier.
   qpoints->pReadBarrierJni = ReadBarrierJni;
   static_assert(!IsDirectEntrypoint(kQuickReadBarrierJni), "Non-direct C stub marked direct.");
+  qpoints->pReadBarrierSlow = artReadBarrierSlow;
+  static_assert(IsDirectEntrypoint(kQuickReadBarrierSlow), "Direct C stub not marked direct.");
+  qpoints->pReadBarrierForRootSlow = artReadBarrierForRootSlow;
+  static_assert(IsDirectEntrypoint(kQuickReadBarrierForRootSlow),
+                "Direct C stub not marked direct.");
 };
 
 }  // namespace art

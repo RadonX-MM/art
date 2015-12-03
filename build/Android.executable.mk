@@ -28,6 +28,7 @@ ART_EXECUTABLES_CFLAGS :=
 # $(5): target or host
 # $(6): ndebug or debug
 # $(7): value for LOCAL_MULTILIB (empty means default)
+# $(8): static or shared (empty means shared, applies only for host)
 define build-art-executable
   ifneq ($(5),target)
     ifneq ($(5),host)
@@ -42,11 +43,12 @@ define build-art-executable
 
   art_executable := $(1)
   art_source := $(2)
-  art_shared_libraries := $(3)
+  art_libraries := $(3)
   art_c_includes := $(4)
   art_target_or_host := $(5)
   art_ndebug_or_debug := $(6)
   art_multilib := $(7)
+  art_static_or_shared := $(8)
   art_out_binary_name :=
 
   include $(CLEAR_VARS)
@@ -54,13 +56,21 @@ define build-art-executable
   LOCAL_MODULE_TAGS := optional
   LOCAL_SRC_FILES := $$(art_source)
   LOCAL_C_INCLUDES += $(ART_C_INCLUDES) art/runtime art/cmdline $$(art_c_includes)
-  LOCAL_SHARED_LIBRARIES += $$(art_shared_libraries)
-  LOCAL_WHOLE_STATIC_LIBRARIES += libsigchain
+
+  ifeq ($$(art_static_or_shared),static)
+    LOCAL_STATIC_LIBRARIES += $$(art_libraries)
+  else
+    LOCAL_SHARED_LIBRARIES += $$(art_libraries)
+  endif
 
   ifeq ($$(art_ndebug_or_debug),ndebug)
     LOCAL_MODULE := $$(art_executable)
   else #debug
     LOCAL_MODULE := $$(art_executable)d
+  endif
+
+  ifeq ($$(art_static_or_shared),static)
+    LOCAL_MODULE := $(LOCAL_MODULE)s
   endif
 
   LOCAL_CFLAGS := $(ART_EXECUTABLES_CFLAGS)
@@ -70,25 +80,46 @@ define build-art-executable
   endif
 
   ifeq ($$(art_target_or_host),target)
-  	$(call set-target-local-clang-vars)
-  	$(call set-target-local-cflags-vars,$(6))
+    $(call set-target-local-clang-vars)
+    $(call set-target-local-cflags-vars,$(6))
     LOCAL_SHARED_LIBRARIES += libdl
   else # host
     LOCAL_CLANG := $(ART_HOST_CLANG)
     LOCAL_LDLIBS := $(ART_HOST_LDLIBS)
     LOCAL_CFLAGS += $(ART_HOST_CFLAGS)
+    LOCAL_ASFLAGS += $(ART_HOST_ASFLAGS)
     ifeq ($$(art_ndebug_or_debug),debug)
       LOCAL_CFLAGS += $(ART_HOST_DEBUG_CFLAGS)
     else
       LOCAL_CFLAGS += $(ART_HOST_NON_DEBUG_CFLAGS)
     endif
     LOCAL_LDLIBS += -lpthread -ldl
+    ifeq ($$(art_static_or_shared),static)
+      LOCAL_LDFLAGS += -static
+      # We need this because GC stress mode makes use of _Unwind_GetIP and _Unwind_Backtrace and
+      # the symbols are also defined in libgcc_eh.a(unwind-dw2.o)
+      # TODO: Having this is not ideal as it might obscure errors. Try to get rid of it.
+      LOCAL_LDFLAGS += -z muldefs
+      ifeq ($$(HOST_OS),linux)
+        LOCAL_LDLIBS += -lrt -lncurses -ltinfo
+      endif
+      ifeq ($$(HOST_OS),darwin)
+        LOCAL_LDLIBS += -lncurses -ltinfo
+      endif
+    endif
+
   endif
 
+  # If dynamically linked add libart by default. Statically linked executables
+  # needs to specify it in art_libraries to ensure proper ordering.
   ifeq ($$(art_ndebug_or_debug),ndebug)
-    LOCAL_SHARED_LIBRARIES += libart
+    ifneq ($$(art_static_or_shared),static)
+      LOCAL_SHARED_LIBRARIES += libart
+    endif
   else # debug
-    LOCAL_SHARED_LIBRARIES += libartd
+    ifneq ($$(art_static_or_shared),static)
+      LOCAL_SHARED_LIBRARIES += libartd
+    endif
   endif
 
   LOCAL_ADDITIONAL_DEPENDENCIES := art/build/Android.common_build.mk
@@ -97,6 +128,10 @@ define build-art-executable
 
   ifeq ($$(art_target_or_host),target)
     LOCAL_MODULE_TARGET_ARCH := $(ART_SUPPORTED_ARCH)
+  endif
+
+  ifdef ART_MULTILIB_OVERRIDE_$$(art_target_or_host)
+    art_multilib := $$(ART_MULTILIB_OVERRIDE_$$(art_target_or_host))
   endif
 
   LOCAL_MULTILIB := $$(art_multilib)
@@ -143,11 +178,12 @@ define build-art-executable
   # Clear out local variables now that we're done with them.
   art_executable :=
   art_source :=
-  art_shared_libraries :=
+  art_libraries :=
   art_c_includes :=
   art_target_or_host :=
   art_ndebug_or_debug :=
   art_multilib :=
+  art_static_or_shared :=
   art_out_binary_name :=
 
 endef

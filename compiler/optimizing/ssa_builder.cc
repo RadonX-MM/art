@@ -22,6 +22,13 @@
 
 namespace art {
 
+// Returns whether this is a loop header phi which was eagerly created but later
+// found inconsistent due to the vreg being undefined in one of its predecessors.
+// Such phi is marked dead and should be ignored until its removal in SsaPhiElimination.
+static bool IsUndefinedLoopHeaderPhi(HPhi* phi) {
+  return phi->IsLoopHeaderPhi() && phi->InputCount() != phi->GetBlock()->GetPredecessors().size();
+}
+
 /**
  * A debuggable application may require to reviving phis, to ensure their
  * associated DEX register is available to a debugger. This class implements
@@ -35,7 +42,9 @@ namespace art {
 class DeadPhiHandling : public ValueObject {
  public:
   explicit DeadPhiHandling(HGraph* graph)
-      : graph_(graph), worklist_(graph->GetArena(), kDefaultWorklistSize) {}
+      : graph_(graph), worklist_(graph->GetArena()->Adapter(kArenaAllocSsaBuilder)) {
+    worklist_.reserve(kDefaultWorklistSize);
+  }
 
   void Run();
 
@@ -47,12 +56,30 @@ class DeadPhiHandling : public ValueObject {
   bool UpdateType(HPhi* phi);
 
   HGraph* const graph_;
-  GrowableArray<HPhi*> worklist_;
+  ArenaVector<HPhi*> worklist_;
 
   static constexpr size_t kDefaultWorklistSize = 8;
 
   DISALLOW_COPY_AND_ASSIGN(DeadPhiHandling);
 };
+
+static bool HasConflictingEquivalent(HPhi* phi) {
+  if (phi->GetNext() == nullptr) {
+    return false;
+  }
+  HPhi* next = phi->GetNext()->AsPhi();
+  if (next->GetRegNumber() == phi->GetRegNumber()) {
+    if (next->GetType() == Primitive::kPrimVoid) {
+      // We only get a void type for an equivalent phi we processed and found out
+      // it was conflicting.
+      return true;
+    } else {
+      // Go to the next phi, in case it is also an equivalent.
+      return HasConflictingEquivalent(next);
+    }
+  }
+  return false;
+}
 
 bool DeadPhiHandling::UpdateType(HPhi* phi) {
   if (phi->IsDead()) {
@@ -85,21 +112,26 @@ bool DeadPhiHandling::UpdateType(HPhi* phi) {
     if (new_type == Primitive::kPrimVoid) {
       new_type = input_type;
     } else if (new_type == Primitive::kPrimNot && input_type == Primitive::kPrimInt) {
+      if (input->IsPhi() && HasConflictingEquivalent(input->AsPhi())) {
+        // If we already asked for an equivalent of the input phi, but that equivalent
+        // ended up conflicting, make this phi conflicting too.
+        conflict = true;
+        break;
+      }
       HInstruction* equivalent = SsaBuilder::GetReferenceTypeEquivalent(input);
       if (equivalent == nullptr) {
         conflict = true;
         break;
-      } else {
-        phi->ReplaceInput(equivalent, i);
-        if (equivalent->IsPhi()) {
-          DCHECK_EQ(equivalent->GetType(), Primitive::kPrimNot);
-          // We created a new phi, but that phi has the same inputs as the old phi. We
-          // add it to the worklist to ensure its inputs can also be converted to reference.
-          // If not, it will remain dead, and the algorithm will make the current phi dead
-          // as well.
-          equivalent->AsPhi()->SetLive();
-          AddToWorklist(equivalent->AsPhi());
-        }
+      }
+      phi->ReplaceInput(equivalent, i);
+      if (equivalent->IsPhi()) {
+        DCHECK_EQ(equivalent->GetType(), Primitive::kPrimNot);
+        // We created a new phi, but that phi has the same inputs as the old phi. We
+        // add it to the worklist to ensure its inputs can also be converted to reference.
+        // If not, it will remain dead, and the algorithm will make the current phi dead
+        // as well.
+        equivalent->AsPhi()->SetLive();
+        AddToWorklist(equivalent->AsPhi());
       }
     } else if (new_type == Primitive::kPrimInt && input_type == Primitive::kPrimNot) {
       new_type = Primitive::kPrimNot;
@@ -140,11 +172,15 @@ bool DeadPhiHandling::UpdateType(HPhi* phi) {
 void DeadPhiHandling::VisitBasicBlock(HBasicBlock* block) {
   for (HInstructionIterator it(block->GetPhis()); !it.Done(); it.Advance()) {
     HPhi* phi = it.Current()->AsPhi();
+    if (IsUndefinedLoopHeaderPhi(phi)) {
+      DCHECK(phi->IsDead());
+      continue;
+    }
     if (phi->IsDead() && phi->HasEnvironmentUses()) {
       phi->SetLive();
       if (block->IsLoopHeader()) {
-        // Give a type to the loop phi, to guarantee convergence of the algorithm.
-        phi->SetType(phi->InputAt(0)->GetType());
+        // Loop phis must have a type to guarantee convergence of the algorithm.
+        DCHECK_NE(phi->GetType(), Primitive::kPrimVoid);
         AddToWorklist(phi);
       } else {
         // Because we are doing a reverse post order visit, all inputs of
@@ -156,8 +192,9 @@ void DeadPhiHandling::VisitBasicBlock(HBasicBlock* block) {
 }
 
 void DeadPhiHandling::ProcessWorklist() {
-  while (!worklist_.IsEmpty()) {
-    HPhi* instruction = worklist_.Pop();
+  while (!worklist_.empty()) {
+    HPhi* instruction = worklist_.back();
+    worklist_.pop_back();
     // Note that the same equivalent phi can be added multiple times in the work list, if
     // used by multiple phis. The first call to `UpdateType` will know whether the phi is
     // dead or live.
@@ -169,7 +206,7 @@ void DeadPhiHandling::ProcessWorklist() {
 
 void DeadPhiHandling::AddToWorklist(HPhi* instruction) {
   DCHECK(instruction->IsLive());
-  worklist_.Add(instruction);
+  worklist_.push_back(instruction);
 }
 
 void DeadPhiHandling::AddDependentInstructionsToWorklist(HPhi* instruction) {
@@ -188,10 +225,25 @@ void DeadPhiHandling::Run() {
   ProcessWorklist();
 }
 
-static bool IsPhiEquivalentOf(HInstruction* instruction, HPhi* phi) {
-  return instruction != nullptr
-      && instruction->IsPhi()
-      && instruction->AsPhi()->GetRegNumber() == phi->GetRegNumber();
+void SsaBuilder::SetLoopHeaderPhiInputs() {
+  for (size_t i = loop_headers_.size(); i > 0; --i) {
+    HBasicBlock* block = loop_headers_[i - 1];
+    for (HInstructionIterator it(block->GetPhis()); !it.Done(); it.Advance()) {
+      HPhi* phi = it.Current()->AsPhi();
+      size_t vreg = phi->GetRegNumber();
+      for (HBasicBlock* predecessor : block->GetPredecessors()) {
+        HInstruction* value = ValueOfLocal(predecessor, vreg);
+        if (value == nullptr) {
+          // Vreg is undefined at this predecessor. Mark it dead and leave with
+          // fewer inputs than predecessors. SsaChecker will fail if not removed.
+          phi->SetDead();
+          break;
+        } else {
+          phi->AddInput(value);
+        }
+      }
+    }
+  }
 }
 
 void SsaBuilder::FixNullConstantType() {
@@ -257,16 +309,7 @@ void SsaBuilder::BuildSsa() {
   }
 
   // 2) Set inputs of loop phis.
-  for (size_t i = 0; i < loop_headers_.Size(); i++) {
-    HBasicBlock* block = loop_headers_.Get(i);
-    for (HInstructionIterator it(block->GetPhis()); !it.Done(); it.Advance()) {
-      HPhi* phi = it.Current()->AsPhi();
-      for (size_t pred = 0; pred < block->GetPredecessors().Size(); pred++) {
-        HInstruction* input = ValueOfLocal(block->GetPredecessors().Get(pred), phi->GetRegNumber());
-        phi->AddInput(input);
-      }
-    }
-  }
+  SetLoopHeaderPhiInputs();
 
   // 3) Mark dead phis. This will mark phis that are only used by environments:
   // at the DEX level, the type of these phis does not need to be consistent, but
@@ -322,13 +365,13 @@ void SsaBuilder::BuildSsa() {
       // If the phi is not dead, or has no environment uses, there is nothing to do.
       if (!phi->IsDead() || !phi->HasEnvironmentUses()) continue;
       HInstruction* next = phi->GetNext();
-      if (!IsPhiEquivalentOf(next, phi)) continue;
+      if (!phi->IsVRegEquivalentOf(next)) continue;
       if (next->AsPhi()->IsDead()) {
         // If the phi equivalent is dead, check if there is another one.
         next = next->GetNext();
-        if (!IsPhiEquivalentOf(next, phi)) continue;
+        if (!phi->IsVRegEquivalentOf(next)) continue;
         // There can be at most two phi equivalents.
-        DCHECK(!IsPhiEquivalentOf(next->GetNext(), phi));
+        DCHECK(!phi->IsVRegEquivalentOf(next->GetNext()));
         if (next->AsPhi()->IsDead()) continue;
       }
       // We found a live phi equivalent. Update the environment uses of `phi` with it.
@@ -363,40 +406,95 @@ void SsaBuilder::BuildSsa() {
   }
 }
 
+ArenaVector<HInstruction*>* SsaBuilder::GetLocalsFor(HBasicBlock* block) {
+  ArenaVector<HInstruction*>* locals = &locals_for_[block->GetBlockId()];
+  const size_t vregs = GetGraph()->GetNumberOfVRegs();
+  if (locals->empty() && vregs != 0u) {
+    locals->resize(vregs, nullptr);
+
+    if (block->IsCatchBlock()) {
+      ArenaAllocator* arena = GetGraph()->GetArena();
+      // We record incoming inputs of catch phis at throwing instructions and
+      // must therefore eagerly create the phis. Phis for undefined vregs will
+      // be deleted when the first throwing instruction with the vreg undefined
+      // is encountered. Unused phis will be removed by dead phi analysis.
+      for (size_t i = 0; i < vregs; ++i) {
+        // No point in creating the catch phi if it is already undefined at
+        // the first throwing instruction.
+        HInstruction* current_local_value = (*current_locals_)[i];
+        if (current_local_value != nullptr) {
+          HPhi* phi = new (arena) HPhi(
+              arena,
+              i,
+              0,
+              current_local_value->GetType());
+          block->AddPhi(phi);
+          (*locals)[i] = phi;
+        }
+      }
+    }
+  }
+  return locals;
+}
+
 HInstruction* SsaBuilder::ValueOfLocal(HBasicBlock* block, size_t local) {
-  return GetLocalsFor(block)->Get(local);
+  ArenaVector<HInstruction*>* locals = GetLocalsFor(block);
+  return (*locals)[local];
 }
 
 void SsaBuilder::VisitBasicBlock(HBasicBlock* block) {
   current_locals_ = GetLocalsFor(block);
 
-  if (block->IsLoopHeader()) {
+  if (block->IsCatchBlock()) {
+    // Catch phis were already created and inputs collected from throwing sites.
+    if (kIsDebugBuild) {
+      // Make sure there was at least one throwing instruction which initialized
+      // locals (guaranteed by HGraphBuilder) and that all try blocks have been
+      // visited already (from HTryBoundary scoping and reverse post order).
+      bool throwing_instruction_found = false;
+      bool catch_block_visited = false;
+      for (HReversePostOrderIterator it(*GetGraph()); !it.Done(); it.Advance()) {
+        HBasicBlock* current = it.Current();
+        if (current == block) {
+          catch_block_visited = true;
+        } else if (current->IsTryBlock() &&
+                   current->GetTryCatchInformation()->GetTryEntry().HasExceptionHandler(*block)) {
+          DCHECK(!catch_block_visited) << "Catch block visited before its try block.";
+          throwing_instruction_found |= current->HasThrowingInstructions();
+        }
+      }
+      DCHECK(throwing_instruction_found) << "No instructions throwing into a live catch block.";
+    }
+  } else if (block->IsLoopHeader()) {
     // If the block is a loop header, we know we only have visited the pre header
     // because we are visiting in reverse post order. We create phis for all initialized
     // locals from the pre header. Their inputs will be populated at the end of
     // the analysis.
-    for (size_t local = 0; local < current_locals_->Size(); local++) {
+    for (size_t local = 0; local < current_locals_->size(); ++local) {
       HInstruction* incoming = ValueOfLocal(block->GetLoopInformation()->GetPreHeader(), local);
       if (incoming != nullptr) {
         HPhi* phi = new (GetGraph()->GetArena()) HPhi(
-            GetGraph()->GetArena(), local, 0, Primitive::kPrimVoid);
+            GetGraph()->GetArena(),
+            local,
+            0,
+            incoming->GetType());
         block->AddPhi(phi);
-        current_locals_->Put(local, phi);
+        (*current_locals_)[local] = phi;
       }
     }
     // Save the loop header so that the last phase of the analysis knows which
     // blocks need to be updated.
-    loop_headers_.Add(block);
-  } else if (block->GetPredecessors().Size() > 0) {
+    loop_headers_.push_back(block);
+  } else if (block->GetPredecessors().size() > 0) {
     // All predecessors have already been visited because we are visiting in reverse post order.
     // We merge the values of all locals, creating phis if those values differ.
-    for (size_t local = 0; local < current_locals_->Size(); local++) {
+    for (size_t local = 0; local < current_locals_->size(); ++local) {
       bool one_predecessor_has_no_value = false;
       bool is_different = false;
-      HInstruction* value = ValueOfLocal(block->GetPredecessors().Get(0), local);
+      HInstruction* value = ValueOfLocal(block->GetPredecessors()[0], local);
 
-      for (size_t i = 0, e = block->GetPredecessors().Size(); i < e; ++i) {
-        HInstruction* current = ValueOfLocal(block->GetPredecessors().Get(i), local);
+      for (HBasicBlock* predecessor : block->GetPredecessors()) {
+        HInstruction* current = ValueOfLocal(predecessor, local);
         if (current == nullptr) {
           one_predecessor_has_no_value = true;
           break;
@@ -412,16 +510,20 @@ void SsaBuilder::VisitBasicBlock(HBasicBlock* block) {
       }
 
       if (is_different) {
+        HInstruction* first_input = ValueOfLocal(block->GetPredecessors()[0], local);
         HPhi* phi = new (GetGraph()->GetArena()) HPhi(
-            GetGraph()->GetArena(), local, block->GetPredecessors().Size(), Primitive::kPrimVoid);
-        for (size_t i = 0; i < block->GetPredecessors().Size(); i++) {
-          HInstruction* pred_value = ValueOfLocal(block->GetPredecessors().Get(i), local);
+            GetGraph()->GetArena(),
+            local,
+            block->GetPredecessors().size(),
+            first_input->GetType());
+        for (size_t i = 0; i < block->GetPredecessors().size(); i++) {
+          HInstruction* pred_value = ValueOfLocal(block->GetPredecessors()[i], local);
           phi->SetRawInputAt(i, pred_value);
         }
         block->AddPhi(phi);
         value = phi;
       }
-      current_locals_->Put(local, value);
+      (*current_locals_)[local] = value;
     }
   }
 
@@ -511,8 +613,16 @@ HPhi* SsaBuilder::GetFloatDoubleOrReferenceEquivalentOfPhi(HPhi* phi, Primitive:
     phi->GetBlock()->InsertPhiAfter(new_phi, phi);
     return new_phi;
   } else {
-    DCHECK_EQ(next->GetType(), type);
-    return next->AsPhi();
+    HPhi* next_phi = next->AsPhi();
+    DCHECK_EQ(next_phi->GetType(), type);
+    if (next_phi->IsDead()) {
+      // TODO(dbrazdil): Remove this SetLive (we should not need to revive phis)
+      // once we stop running MarkDeadPhis before PrimitiveTypePropagation. This
+      // cannot revive undefined loop header phis because they cannot have uses.
+      DCHECK(!IsUndefinedLoopHeaderPhi(next_phi));
+      next_phi->SetLive();
+    }
+    return next_phi;
   }
 }
 
@@ -536,7 +646,7 @@ HInstruction* SsaBuilder::GetFloatOrDoubleEquivalent(HInstruction* user,
     // typed and the value in a dex register will not be used for both floating point and
     // non-floating point operations. So the only reason an instruction would want a floating
     // point equivalent is for an unused phi that will be removed by the dead phi elimination phase.
-    DCHECK(user->IsPhi());
+    DCHECK(user->IsPhi()) << "is actually " << user->DebugName() << " (" << user->GetId() << ")";
     return value;
   }
 }
@@ -552,7 +662,7 @@ HInstruction* SsaBuilder::GetReferenceTypeEquivalent(HInstruction* value) {
 }
 
 void SsaBuilder::VisitLoadLocal(HLoadLocal* load) {
-  HInstruction* value = current_locals_->Get(load->GetLocal()->GetRegNumber());
+  HInstruction* value = (*current_locals_)[load->GetLocal()->GetRegNumber()];
   // If the operation requests a specific type, we make sure its input is of that type.
   if (load->GetType() != value->GetType()) {
     if (load->GetType() == Primitive::kPrimFloat || load->GetType() == Primitive::kPrimDouble) {
@@ -566,22 +676,83 @@ void SsaBuilder::VisitLoadLocal(HLoadLocal* load) {
 }
 
 void SsaBuilder::VisitStoreLocal(HStoreLocal* store) {
-  current_locals_->Put(store->GetLocal()->GetRegNumber(), store->InputAt(1));
+  uint32_t reg_number = store->GetLocal()->GetRegNumber();
+  HInstruction* stored_value = store->InputAt(1);
+  Primitive::Type stored_type = stored_value->GetType();
+  DCHECK_NE(stored_type, Primitive::kPrimVoid);
+
+  // Storing into vreg `reg_number` may implicitly invalidate the surrounding
+  // registers. Consider the following cases:
+  // (1) Storing a wide value must overwrite previous values in both `reg_number`
+  //     and `reg_number+1`. We store `nullptr` in `reg_number+1`.
+  // (2) If vreg `reg_number-1` holds a wide value, writing into `reg_number`
+  //     must invalidate it. We store `nullptr` in `reg_number-1`.
+  // Consequently, storing a wide value into the high vreg of another wide value
+  // will invalidate both `reg_number-1` and `reg_number+1`.
+
+  if (reg_number != 0) {
+    HInstruction* local_low = (*current_locals_)[reg_number - 1];
+    if (local_low != nullptr && Primitive::Is64BitType(local_low->GetType())) {
+      // The vreg we are storing into was previously the high vreg of a pair.
+      // We need to invalidate its low vreg.
+      DCHECK((*current_locals_)[reg_number] == nullptr);
+      (*current_locals_)[reg_number - 1] = nullptr;
+    }
+  }
+
+  (*current_locals_)[reg_number] = stored_value;
+  if (Primitive::Is64BitType(stored_type)) {
+    // We are storing a pair. Invalidate the instruction in the high vreg.
+    (*current_locals_)[reg_number + 1] = nullptr;
+  }
+
   store->GetBlock()->RemoveInstruction(store);
 }
 
 void SsaBuilder::VisitInstruction(HInstruction* instruction) {
-  if (!instruction->NeedsEnvironment()) {
-    return;
+  if (instruction->NeedsEnvironment()) {
+    HEnvironment* environment = new (GetGraph()->GetArena()) HEnvironment(
+        GetGraph()->GetArena(),
+        current_locals_->size(),
+        GetGraph()->GetDexFile(),
+        GetGraph()->GetMethodIdx(),
+        instruction->GetDexPc(),
+        GetGraph()->GetInvokeType(),
+        instruction);
+    environment->CopyFrom(*current_locals_);
+    instruction->SetRawEnvironment(environment);
   }
-  HEnvironment* environment = new (GetGraph()->GetArena()) HEnvironment(
-      GetGraph()->GetArena(),
-      current_locals_->Size(),
-      GetGraph()->GetDexFile(),
-      GetGraph()->GetMethodIdx(),
-      instruction->GetDexPc());
-  environment->CopyFrom(*current_locals_);
-  instruction->SetRawEnvironment(environment);
+
+  // If in a try block, propagate values of locals into catch blocks.
+  if (instruction->CanThrowIntoCatchBlock()) {
+    const HTryBoundary& try_entry =
+        instruction->GetBlock()->GetTryCatchInformation()->GetTryEntry();
+    for (HBasicBlock* catch_block : try_entry.GetExceptionHandlers()) {
+      ArenaVector<HInstruction*>* handler_locals = GetLocalsFor(catch_block);
+      DCHECK_EQ(handler_locals->size(), current_locals_->size());
+      for (size_t vreg = 0, e = current_locals_->size(); vreg < e; ++vreg) {
+        HInstruction* handler_value = (*handler_locals)[vreg];
+        if (handler_value == nullptr) {
+          // Vreg was undefined at a previously encountered throwing instruction
+          // and the catch phi was deleted. Do not record the local value.
+          continue;
+        }
+        DCHECK(handler_value->IsPhi());
+
+        HInstruction* local_value = (*current_locals_)[vreg];
+        if (local_value == nullptr) {
+          // This is the first instruction throwing into `catch_block` where
+          // `vreg` is undefined. Delete the catch phi.
+          catch_block->RemovePhi(handler_value->AsPhi());
+          (*handler_locals)[vreg] = nullptr;
+        } else {
+          // Vreg has been defined at all instructions throwing into `catch_block`
+          // encountered so far. Record the local value in the catch phi.
+          handler_value->AsPhi()->AddInput(local_value);
+        }
+      }
+    }
+  }
 }
 
 void SsaBuilder::VisitTemporary(HTemporary* temp) {

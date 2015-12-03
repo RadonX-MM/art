@@ -97,7 +97,7 @@ OatHeader::OatHeader(InstructionSet instruction_set,
   image_file_location_oat_checksum_ = image_file_location_oat_checksum;
   UpdateChecksum(&image_file_location_oat_checksum_, sizeof(image_file_location_oat_checksum_));
 
-  CHECK(IsAligned<kPageSize>(image_file_location_oat_data_begin));
+  CHECK_ALIGNED(image_file_location_oat_data_begin, kPageSize);
   image_file_location_oat_data_begin_ = image_file_location_oat_data_begin;
   UpdateChecksum(&image_file_location_oat_data_begin_, sizeof(image_file_location_oat_data_begin_));
 
@@ -134,6 +134,9 @@ bool OatHeader::IsValid() const {
   if (!IsAligned<kPageSize>(image_patch_delta_)) {
     return false;
   }
+  if (!IsValidInstructionSet(instruction_set_)) {
+    return false;
+  }
   return true;
 }
 
@@ -155,6 +158,9 @@ std::string OatHeader::GetValidationErrorMessage() const {
   }
   if (!IsAligned<kPageSize>(image_patch_delta_)) {
     return "Image patch delta not page-aligned.";
+  }
+  if (!IsValidInstructionSet(instruction_set_)) {
+    return StringPrintf("Invalid instruction set, %d.", static_cast<int>(instruction_set_));
   }
   return "";
 }
@@ -476,16 +482,5 @@ OatMethodOffsets::OatMethodOffsets(uint32_t code_offset) : code_offset_(code_off
 }
 
 OatMethodOffsets::~OatMethodOffsets() {}
-
-OatQuickMethodHeader::OatQuickMethodHeader(
-    uint32_t mapping_table_offset, uint32_t vmap_table_offset, uint32_t gc_map_offset,
-    uint32_t frame_size_in_bytes, uint32_t core_spill_mask, uint32_t fp_spill_mask,
-    uint32_t code_size)
-    : mapping_table_offset_(mapping_table_offset), vmap_table_offset_(vmap_table_offset),
-      gc_map_offset_(gc_map_offset),
-      frame_info_(frame_size_in_bytes, core_spill_mask, fp_spill_mask), code_size_(code_size) {
-}
-
-OatQuickMethodHeader::~OatQuickMethodHeader() {}
 
 }  // namespace art

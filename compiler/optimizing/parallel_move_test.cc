@@ -56,7 +56,7 @@ class TestParallelMoveResolverWithSwap : public ParallelMoveResolverWithSwap {
       : ParallelMoveResolverWithSwap(allocator) {}
 
   void EmitMove(size_t index) OVERRIDE {
-    MoveOperands* move = moves_.Get(index);
+    MoveOperands* move = moves_[index];
     if (!message_.str().empty()) {
       message_ << " ";
     }
@@ -68,7 +68,7 @@ class TestParallelMoveResolverWithSwap : public ParallelMoveResolverWithSwap {
   }
 
   void EmitSwap(size_t index) OVERRIDE {
-    MoveOperands* move = moves_.Get(index);
+    MoveOperands* move = moves_[index];
     if (!message_.str().empty()) {
       message_ << " ";
     }
@@ -127,7 +127,7 @@ class TestParallelMoveResolverNoSwap : public ParallelMoveResolverNoSwap {
   void FreeScratchLocation(Location loc ATTRIBUTE_UNUSED) OVERRIDE {}
 
   void EmitMove(size_t index) OVERRIDE {
-    MoveOperands* move = moves_.Get(index);
+    MoveOperands* move = moves_[index];
     if (!message_.str().empty()) {
       message_ << " ";
     }

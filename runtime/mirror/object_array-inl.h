@@ -129,7 +129,8 @@ inline void ObjectArray<T>::AssignableMemmove(int32_t dst_pos, ObjectArray<T>* s
     }
   }
   // Perform the memmove using int memmove then perform the write barrier.
-  CHECK_EQ(sizeof(HeapReference<T>), sizeof(uint32_t));
+  static_assert(sizeof(HeapReference<T>) == sizeof(uint32_t),
+                "art::mirror::HeapReference<T> and uint32_t have different sizes.");
   IntArray* dstAsIntArray = reinterpret_cast<IntArray*>(this);
   IntArray* srcAsIntArray = reinterpret_cast<IntArray*>(src);
   if (kUseReadBarrier) {
@@ -172,7 +173,8 @@ inline void ObjectArray<T>::AssignableMemcpy(int32_t dst_pos, ObjectArray<T>* sr
     }
   }
   // Perform the memmove using int memcpy then perform the write barrier.
-  CHECK_EQ(sizeof(HeapReference<T>), sizeof(uint32_t));
+  static_assert(sizeof(HeapReference<T>) == sizeof(uint32_t),
+                "art::mirror::HeapReference<T> and uint32_t have different sizes.");
   IntArray* dstAsIntArray = reinterpret_cast<IntArray*>(this);
   IntArray* srcAsIntArray = reinterpret_cast<IntArray*>(src);
   if (kUseReadBarrier) {
@@ -267,11 +269,8 @@ inline MemberOffset ObjectArray<T>::OffsetOfElement(int32_t i) {
                       (i * sizeof(HeapReference<Object>)));
 }
 
-template<class T> template<const bool kVisitClass, typename Visitor>
-void ObjectArray<T>::VisitReferences(const Visitor& visitor) {
-  if (kVisitClass) {
-    visitor(this, ClassOffset(), false);
-  }
+template<class T> template<typename Visitor>
+inline void ObjectArray<T>::VisitReferences(const Visitor& visitor) {
   const size_t length = static_cast<size_t>(GetLength());
   for (size_t i = 0; i < length; ++i) {
     visitor(this, OffsetOfElement(i), false);

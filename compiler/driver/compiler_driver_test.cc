@@ -37,7 +37,7 @@ namespace art {
 
 class CompilerDriverTest : public CommonCompilerTest {
  protected:
-  void CompileAll(jobject class_loader) LOCKS_EXCLUDED(Locks::mutator_lock_) {
+  void CompileAll(jobject class_loader) REQUIRES(!Locks::mutator_lock_) {
     TimingLogger timings("CompilerDriverTest::CompileAll", false, false);
     TimingLogger::ScopedTiming t(__FUNCTION__, &timings);
     compiler_driver_->CompileAll(class_loader,
@@ -49,7 +49,7 @@ class CompilerDriverTest : public CommonCompilerTest {
 
   void EnsureCompiled(jobject class_loader, const char* class_name, const char* method,
                       const char* signature, bool is_virtual)
-      LOCKS_EXCLUDED(Locks::mutator_lock_) {
+      REQUIRES(!Locks::mutator_lock_) {
     CompileAll(class_loader);
     Thread::Current()->TransitionFromSuspendedToRunnable();
     bool started = runtime_->Start();
@@ -108,7 +108,7 @@ TEST_F(CompilerDriverTest, DISABLED_LARGE_CompileDexLibCore) {
   ScopedObjectAccess soa(Thread::Current());
   ASSERT_TRUE(java_lang_dex_file_ != nullptr);
   const DexFile& dex = *java_lang_dex_file_;
-  mirror::DexCache* dex_cache = class_linker_->FindDexCache(dex);
+  mirror::DexCache* dex_cache = class_linker_->FindDexCache(soa.Self(), dex);
   EXPECT_EQ(dex.NumStringIds(), dex_cache->NumStrings());
   for (size_t i = 0; i < dex_cache->NumStrings(); i++) {
     const mirror::String* string = dex_cache->GetResolvedString(i);
@@ -146,7 +146,9 @@ TEST_F(CompilerDriverTest, DISABLED_LARGE_CompileDexLibCore) {
 }
 
 TEST_F(CompilerDriverTest, AbstractMethodErrorStub) {
-  TEST_DISABLED_FOR_HEAP_REFERENCE_POISONING();
+  TEST_DISABLED_FOR_HEAP_REFERENCE_POISONING_WITH_QUICK();
+  TEST_DISABLED_FOR_READ_BARRIER_WITH_QUICK();
+  TEST_DISABLED_FOR_READ_BARRIER_WITH_OPTIMIZING_FOR_UNSUPPORTED_INSTRUCTION_SETS();
   jobject class_loader;
   {
     ScopedObjectAccess soa(Thread::Current());
@@ -192,6 +194,9 @@ class CompilerDriverMethodsTest : public CompilerDriverTest {
 };
 
 TEST_F(CompilerDriverMethodsTest, Selection) {
+  TEST_DISABLED_FOR_HEAP_REFERENCE_POISONING_WITH_QUICK();
+  TEST_DISABLED_FOR_READ_BARRIER_WITH_QUICK();
+  TEST_DISABLED_FOR_READ_BARRIER_WITH_OPTIMIZING_FOR_UNSUPPORTED_INSTRUCTION_SETS();
   Thread* self = Thread::Current();
   jobject class_loader;
   {
@@ -209,8 +214,8 @@ TEST_F(CompilerDriverMethodsTest, Selection) {
   CompileAll(class_loader);
 
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
-  StackHandleScope<1> hs(self);
   ScopedObjectAccess soa(self);
+  StackHandleScope<1> hs(self);
   Handle<mirror::ClassLoader> h_loader(hs.NewHandle(
       reinterpret_cast<mirror::ClassLoader*>(self->DecodeJObject(class_loader))));
   mirror::Class* klass = class_linker->FindClass(self, "LStaticLeafMethods;", h_loader);

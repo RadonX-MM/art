@@ -23,41 +23,79 @@
 #include "mem_map.h"
 #include "mutex.h"
 #include "thread-inl.h"
-#include <memcheck/memcheck.h>
 
 namespace art {
 
-static constexpr size_t kValgrindRedZoneBytes = 8;
+static constexpr size_t kMemoryToolRedZoneBytes = 8;
 constexpr size_t Arena::kDefaultSize;
 
 template <bool kCount>
 const char* const ArenaAllocatorStatsImpl<kCount>::kAllocNames[] = {
-  "Misc       ",
-  "BasicBlock ",
-  "BBList     ",
-  "BBPreds    ",
-  "DfsPreOrd  ",
-  "DfsPostOrd ",
-  "DomPostOrd ",
-  "TopoOrd    ",
-  "Lowering   ",
-  "LIR        ",
-  "LIR masks  ",
-  "SwitchTbl  ",
-  "FillArray  ",
-  "SlowPaths  ",
-  "MIR        ",
-  "DataFlow   ",
-  "GrowList   ",
-  "GrowBitMap ",
-  "SSA2Dalvik ",
-  "Dalvik2SSA ",
-  "DebugInfo  ",
-  "Successor  ",
-  "RegAlloc   ",
-  "Data       ",
-  "Preds      ",
-  "STL        ",
+  "Misc         ",
+  "BBList       ",
+  "BBPreds      ",
+  "DfsPreOrd    ",
+  "DfsPostOrd   ",
+  "DomPostOrd   ",
+  "TopoOrd      ",
+  "Lowering     ",
+  "LIR          ",
+  "LIR masks    ",
+  "SwitchTbl    ",
+  "FillArray    ",
+  "SlowPaths    ",
+  "MIR          ",
+  "DataFlow     ",
+  "GrowList     ",
+  "GrowBitMap   ",
+  "SSA2Dalvik   ",
+  "Dalvik2SSA   ",
+  "DebugInfo    ",
+  "RegAlloc     ",
+  "Data         ",
+  "STL          ",
+  "GraphBuilder ",
+  "Graph        ",
+  "BasicBlock   ",
+  "BlockList    ",
+  "RevPostOrder ",
+  "LinearOrder  ",
+  "ConstantsMap ",
+  "Predecessors ",
+  "Successors   ",
+  "Dominated    ",
+  "Instruction  ",
+  "InvokeInputs ",
+  "PhiInputs    ",
+  "LoopInfo     ",
+  "LIBackEdges  ",
+  "TryCatchInf  ",
+  "UseListNode  ",
+  "Environment  ",
+  "EnvVRegs     ",
+  "EnvLocations ",
+  "LocSummary   ",
+  "SsaBuilder   ",
+  "MoveOperands ",
+  "CodeBuffer   ",
+  "StackMaps    ",
+  "BaselineMaps ",
+  "Optimization ",
+  "GVN          ",
+  "InductionVar ",
+  "BCE          ",
+  "SsaLiveness  ",
+  "SsaPhiElim   ",
+  "RefTypeProp  ",
+  "PrimTypeProp ",
+  "SideEffects  ",
+  "RegAllocator ",
+  "StackMapStm  ",
+  "CodeGen      ",
+  "ParallelMove ",
+  "GraphChecker ",
+  "LSE          ",
+  "Verifier     ",
 };
 
 template <bool kCount>
@@ -120,6 +158,18 @@ void ArenaAllocatorStatsImpl<kCount>::Dump(std::ostream& os, const Arena* first,
 
 // Explicitly instantiate the used implementation.
 template class ArenaAllocatorStatsImpl<kArenaAllocatorCountAllocations>;
+
+void ArenaAllocatorMemoryTool::DoMakeDefined(void* ptr, size_t size) {
+  MEMORY_TOOL_MAKE_DEFINED(ptr, size);
+}
+
+void ArenaAllocatorMemoryTool::DoMakeUndefined(void* ptr, size_t size) {
+  MEMORY_TOOL_MAKE_UNDEFINED(ptr, size);
+}
+
+void ArenaAllocatorMemoryTool::DoMakeInaccessible(void* ptr, size_t size) {
+  MEMORY_TOOL_MAKE_NOACCESS(ptr, size);
+}
 
 Arena::Arena() : bytes_allocated_(0), next_(nullptr) {
 }
@@ -217,9 +267,9 @@ size_t ArenaPool::GetBytesAllocated() const {
 }
 
 void ArenaPool::FreeArenaChain(Arena* first) {
-  if (UNLIKELY(RUNNING_ON_VALGRIND > 0)) {
+  if (UNLIKELY(RUNNING_ON_MEMORY_TOOL > 0)) {
     for (Arena* arena = first; arena != nullptr; arena = arena->next_) {
-      VALGRIND_MAKE_MEM_UNDEFINED(arena->memory_, arena->bytes_allocated_);
+      MEMORY_TOOL_MAKE_UNDEFINED(arena->memory_, arena->bytes_allocated_);
     }
   }
   if (first != nullptr) {
@@ -254,8 +304,7 @@ ArenaAllocator::ArenaAllocator(ArenaPool* pool)
     begin_(nullptr),
     end_(nullptr),
     ptr_(nullptr),
-    arena_head_(nullptr),
-    running_on_valgrind_(RUNNING_ON_VALGRIND > 0) {
+    arena_head_(nullptr) {
 }
 
 void ArenaAllocator::UpdateBytesAllocated() {
@@ -266,23 +315,23 @@ void ArenaAllocator::UpdateBytesAllocated() {
   }
 }
 
-void* ArenaAllocator::AllocValgrind(size_t bytes, ArenaAllocKind kind) {
-  size_t rounded_bytes = RoundUp(bytes + kValgrindRedZoneBytes, 8);
+void* ArenaAllocator::AllocWithMemoryTool(size_t bytes, ArenaAllocKind kind) {
+  // We mark all memory for a newly retrieved arena as inaccessible and then
+  // mark only the actually allocated memory as defined. That leaves red zones
+  // and padding between allocations marked as inaccessible.
+  size_t rounded_bytes = RoundUp(bytes + kMemoryToolRedZoneBytes, 8);
   if (UNLIKELY(ptr_ + rounded_bytes > end_)) {
     // Obtain a new block.
     ObtainNewArenaForAllocation(rounded_bytes);
-    if (UNLIKELY(ptr_ == nullptr)) {
-      return nullptr;
-    }
+    CHECK(ptr_ != nullptr);
+    MEMORY_TOOL_MAKE_NOACCESS(ptr_, end_ - ptr_);
   }
   ArenaAllocatorStats::RecordAlloc(rounded_bytes, kind);
   uint8_t* ret = ptr_;
   ptr_ += rounded_bytes;
+  MEMORY_TOOL_MAKE_DEFINED(ret, bytes);
   // Check that the memory is already zeroed out.
-  for (uint8_t* ptr = ret; ptr < ptr_; ++ptr) {
-    CHECK_EQ(*ptr, 0U);
-  }
-  VALGRIND_MAKE_MEM_NOACCESS(ret + bytes, rounded_bytes - bytes);
+  DCHECK(std::all_of(ret, ret + bytes, [](uint8_t val) { return val == 0u; }));
   return ret;
 }
 

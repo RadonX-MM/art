@@ -1,3 +1,19 @@
+/*
+ * Copyright (C) 2015 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package android.test.anno;
 
 import java.lang.annotation.Annotation;
@@ -180,5 +196,34 @@ public class TestAnnotations {
         printAnnotationArray("    ", TestAnnotations.class.getPackage().getAnnotations());
         System.out.println("Package declared annotations:");
         printAnnotationArray("    ", TestAnnotations.class.getPackage().getDeclaredAnnotations());
+
+        System.out.println();
+
+        // Test inner classes.
+        System.out.println("Inner Classes:");
+        new ClassWithInnerClasses().print();
+
+        System.out.println();
+
+        // Test TypeNotPresentException.
+        try {
+            AnnoMissingClass missingAnno =
+                ClassWithMissingAnnotation.class.getAnnotation(AnnoMissingClass.class);
+            System.out.println("Get annotation with missing class should not throw");
+            System.out.println(missingAnno.value());
+            System.out.println("Getting value of missing annotaton should have thrown");
+        } catch (TypeNotPresentException expected) {
+            System.out.println("Got expected TypeNotPresentException");
+        }
+
+        // Test renamed enums.
+        try {
+            for (Method m: RenamedNoted.class.getDeclaredMethods()) {
+                Annotation[] annos = m.getDeclaredAnnotations();
+                System.out.println("  annotations on METH " + m + ":");
+            }
+        } catch (NoSuchFieldError expected) {
+            System.out.println("Got expected NoSuchFieldError");
+        }
     }
 }

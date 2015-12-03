@@ -15,11 +15,12 @@
  */
 
 #include "gvn.h"
+
+#include "base/arena_bit_vector.h"
+#include "base/arena_containers.h"
+#include "base/bit_vector-inl.h"
 #include "side_effects_analysis.h"
 #include "utils.h"
-
-#include "utils/arena_bit_vector.h"
-#include "base/bit_vector-inl.h"
 
 namespace art {
 
@@ -32,13 +33,13 @@ namespace art {
  * if there is one in the set. In GVN, we would say those instructions have the
  * same "number".
  */
-class ValueSet : public ArenaObject<kArenaAllocMisc> {
+class ValueSet : public ArenaObject<kArenaAllocGvn> {
  public:
   // Constructs an empty ValueSet which owns all its buckets.
   explicit ValueSet(ArenaAllocator* allocator)
       : allocator_(allocator),
         num_buckets_(kMinimumNumberOfBuckets),
-        buckets_(allocator->AllocArray<Node*>(num_buckets_)),
+        buckets_(allocator->AllocArray<Node*>(num_buckets_, kArenaAllocGvn)),
         buckets_owned_(allocator, num_buckets_, false),
         num_entries_(0) {
     // ArenaAllocator returns zeroed memory, so no need to set buckets to null.
@@ -51,7 +52,7 @@ class ValueSet : public ArenaObject<kArenaAllocMisc> {
   ValueSet(ArenaAllocator* allocator, const ValueSet& to_copy)
       : allocator_(allocator),
         num_buckets_(to_copy.IdealBucketCount()),
-        buckets_(allocator->AllocArray<Node*>(num_buckets_)),
+        buckets_(allocator->AllocArray<Node*>(num_buckets_, kArenaAllocGvn)),
         buckets_owned_(allocator, num_buckets_, false),
         num_entries_(to_copy.num_entries_) {
     // ArenaAllocator returns zeroed memory, so entries of buckets_ and
@@ -120,7 +121,7 @@ class ValueSet : public ArenaObject<kArenaAllocMisc> {
   // Removes all instructions in the set affected by the given side effects.
   void Kill(SideEffects side_effects) {
     DeleteAllImpureWhich([side_effects](Node* node) {
-      return node->GetInstruction()->GetSideEffects().DependsOn(side_effects);
+      return node->GetInstruction()->GetSideEffects().MayDependOn(side_effects);
     });
   }
 
@@ -143,7 +144,7 @@ class ValueSet : public ArenaObject<kArenaAllocMisc> {
   size_t GetNumberOfEntries() const { return num_entries_; }
 
  private:
-  class Node : public ArenaObject<kArenaAllocMisc> {
+  class Node : public ArenaObject<kArenaAllocGvn> {
    public:
     Node(HInstruction* instruction, size_t hash_code, Node* next)
         : instruction_(instruction), hash_code_(hash_code), next_(next) {}
@@ -306,7 +307,7 @@ class GlobalValueNumberer : public ValueObject {
       : graph_(graph),
         allocator_(allocator),
         side_effects_(side_effects),
-        sets_(allocator, graph->GetBlocks().Size(), nullptr) {}
+        sets_(graph->GetBlocks().size(), nullptr, allocator->Adapter(kArenaAllocGvn)) {}
 
   void Run();
 
@@ -322,14 +323,14 @@ class GlobalValueNumberer : public ValueObject {
   // ValueSet for blocks. Initially null, but for an individual block they
   // are allocated and populated by the dominator, and updated by all blocks
   // in the path from the dominator to the block.
-  GrowableArray<ValueSet*> sets_;
+  ArenaVector<ValueSet*> sets_;
 
   DISALLOW_COPY_AND_ASSIGN(GlobalValueNumberer);
 };
 
 void GlobalValueNumberer::Run() {
   DCHECK(side_effects_.HasRun());
-  sets_.Put(graph_->GetEntryBlock()->GetBlockId(), new (allocator_) ValueSet(allocator_));
+  sets_[graph_->GetEntryBlock()->GetBlockId()] = new (allocator_) ValueSet(allocator_);
 
   // Use the reverse post order to ensure the non back-edge predecessors of a block are
   // visited before the block itself.
@@ -340,17 +341,17 @@ void GlobalValueNumberer::Run() {
 
 void GlobalValueNumberer::VisitBasicBlock(HBasicBlock* block) {
   ValueSet* set = nullptr;
-  const GrowableArray<HBasicBlock*>& predecessors = block->GetPredecessors();
-  if (predecessors.Size() == 0 || predecessors.Get(0)->IsEntryBlock()) {
+  const ArenaVector<HBasicBlock*>& predecessors = block->GetPredecessors();
+  if (predecessors.size() == 0 || predecessors[0]->IsEntryBlock()) {
     // The entry block should only accumulate constant instructions, and
     // the builder puts constants only in the entry block.
     // Therefore, there is no need to propagate the value set to the next block.
     set = new (allocator_) ValueSet(allocator_);
   } else {
     HBasicBlock* dominator = block->GetDominator();
-    ValueSet* dominator_set = sets_.Get(dominator->GetBlockId());
-    if (dominator->GetSuccessors().Size() == 1) {
-      DCHECK_EQ(dominator->GetSuccessors().Get(0), block);
+    ValueSet* dominator_set = sets_[dominator->GetBlockId()];
+    if (dominator->GetSuccessors().size() == 1) {
+      DCHECK_EQ(dominator->GetSuccessors()[0], block);
       set = dominator_set;
     } else {
       // We have to copy if the dominator has other successors, or `block` is not a successor
@@ -361,9 +362,9 @@ void GlobalValueNumberer::VisitBasicBlock(HBasicBlock* block) {
       if (block->IsLoopHeader()) {
         DCHECK_EQ(block->GetDominator(), block->GetLoopInformation()->GetPreHeader());
         set->Kill(side_effects_.GetLoopEffects(block));
-      } else if (predecessors.Size() > 1) {
-        for (size_t i = 0, e = predecessors.Size(); i < e; ++i) {
-          set->IntersectWith(sets_.Get(predecessors.Get(i)->GetBlockId()));
+      } else if (predecessors.size() > 1) {
+        for (HBasicBlock* predecessor : predecessors) {
+          set->IntersectWith(sets_[predecessor->GetBlockId()]);
           if (set->IsEmpty()) {
             break;
           }
@@ -372,13 +373,14 @@ void GlobalValueNumberer::VisitBasicBlock(HBasicBlock* block) {
     }
   }
 
-  sets_.Put(block->GetBlockId(), set);
+  sets_[block->GetBlockId()] = set;
 
   HInstruction* current = block->GetFirstInstruction();
   while (current != nullptr) {
-    set->Kill(current->GetSideEffects());
     // Save the next instruction in case `current` is removed from the graph.
     HInstruction* next = current->GetNext();
+    // Do not kill the set with the side effects of the instruction just now: if
+    // the instruction is GVN'ed, we don't need to kill.
     if (current->CanBeMoved()) {
       if (current->IsBinaryOperation() && current->AsBinaryOperation()->IsCommutative()) {
         // For commutative ops, (x op y) will be treated the same as (y op x)
@@ -394,8 +396,11 @@ void GlobalValueNumberer::VisitBasicBlock(HBasicBlock* block) {
         current->ReplaceWith(existing);
         current->GetBlock()->RemoveInstruction(current);
       } else {
+        set->Kill(current->GetSideEffects());
         set->Add(current);
       }
+    } else {
+      set->Kill(current->GetSideEffects());
     }
     current = next;
   }

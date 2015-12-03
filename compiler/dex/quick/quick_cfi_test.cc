@@ -36,7 +36,7 @@
 namespace art {
 
 // Run the tests only on host.
-#ifndef HAVE_ANDROID_OS
+#ifndef __ANDROID__
 
 class QuickCFITest : public CFITest {
  public:
@@ -67,7 +67,6 @@ class QuickCFITest : public CFITest {
       false,
       false,
       nullptr,
-      new PassManagerOptions(),
       nullptr,
       false);
     VerificationResults verification_results(&compiler_options);
@@ -77,7 +76,7 @@ class QuickCFITest : public CFITest {
     isa_features.reset(InstructionSetFeatures::FromVariant(isa, "default", &error));
     CompilerDriver driver(&compiler_options, &verification_results, &method_inliner_map,
                           Compiler::kQuick, isa, isa_features.get(),
-                          false, nullptr, nullptr, nullptr, 0, false, false, "", 0, -1, "");
+                          false, nullptr, nullptr, nullptr, 0, false, false, "", false, 0, -1, "");
     ClassLinker* linker = nullptr;
     CompilationUnit cu(&pool, isa, &driver, linker);
     DexFile::CodeItem code_item { 0, 0, 0, 0, 0, 0, { 0 } };  // NOLINT
@@ -136,6 +135,6 @@ TEST_ISA(kX86_64)
 TEST_ISA(kMips)
 TEST_ISA(kMips64)
 
-#endif  // HAVE_ANDROID_OS
+#endif  // __ANDROID__
 
 }  // namespace art

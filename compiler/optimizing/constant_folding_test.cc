@@ -29,50 +29,70 @@
 
 namespace art {
 
-static void TestCode(const uint16_t* data,
-                     const std::string& expected_before,
-                     const std::string& expected_after_cf,
-                     const std::string& expected_after_dce,
-                     std::function<void(HGraph*)> check_after_cf,
-                     Primitive::Type return_type = Primitive::kPrimInt) {
-  ArenaPool pool;
-  ArenaAllocator allocator(&pool);
-  HGraph* graph = CreateCFG(&allocator, data, return_type);
-  ASSERT_NE(graph, nullptr);
+/**
+ * Fixture class for the constant folding and dce tests.
+ */
+class ConstantFoldingTest : public testing::Test {
+ public:
+  ConstantFoldingTest() : pool_(), allocator_(&pool_) {
+    graph_ = CreateGraph(&allocator_);
+  }
 
-  graph->TryBuildingSsa();
+  void TestCode(const uint16_t* data,
+                const std::string& expected_before,
+                const std::string& expected_after_cf,
+                const std::string& expected_after_dce,
+                std::function<void(HGraph*)> check_after_cf,
+                Primitive::Type return_type = Primitive::kPrimInt) {
+    graph_ = CreateCFG(&allocator_, data, return_type);
+    TestCodeOnReadyGraph(expected_before,
+                         expected_after_cf,
+                         expected_after_dce,
+                         check_after_cf);
+  }
 
-  StringPrettyPrinter printer_before(graph);
-  printer_before.VisitInsertionOrder();
-  std::string actual_before = printer_before.str();
-  ASSERT_EQ(expected_before, actual_before);
+  void TestCodeOnReadyGraph(const std::string& expected_before,
+                            const std::string& expected_after_cf,
+                            const std::string& expected_after_dce,
+                            std::function<void(HGraph*)> check_after_cf) {
+    ASSERT_NE(graph_, nullptr);
+    graph_->TryBuildingSsa();
 
-  std::unique_ptr<const X86InstructionSetFeatures> features_x86(
-      X86InstructionSetFeatures::FromCppDefines());
-  x86::CodeGeneratorX86 codegenX86(graph, *features_x86.get(), CompilerOptions());
-  HConstantFolding(graph).Run();
-  SSAChecker ssa_checker_cf(&allocator, graph);
-  ssa_checker_cf.Run();
-  ASSERT_TRUE(ssa_checker_cf.IsValid());
+    StringPrettyPrinter printer_before(graph_);
+    printer_before.VisitInsertionOrder();
+    std::string actual_before = printer_before.str();
+    EXPECT_EQ(expected_before, actual_before);
 
-  StringPrettyPrinter printer_after_cf(graph);
-  printer_after_cf.VisitInsertionOrder();
-  std::string actual_after_cf = printer_after_cf.str();
-  ASSERT_EQ(expected_after_cf, actual_after_cf);
+    std::unique_ptr<const X86InstructionSetFeatures> features_x86(
+        X86InstructionSetFeatures::FromCppDefines());
+    x86::CodeGeneratorX86 codegenX86(graph_, *features_x86.get(), CompilerOptions());
+    HConstantFolding(graph_).Run();
+    SSAChecker ssa_checker_cf(graph_);
+    ssa_checker_cf.Run();
+    ASSERT_TRUE(ssa_checker_cf.IsValid());
 
-  check_after_cf(graph);
+    StringPrettyPrinter printer_after_cf(graph_);
+    printer_after_cf.VisitInsertionOrder();
+    std::string actual_after_cf = printer_after_cf.str();
+    EXPECT_EQ(expected_after_cf, actual_after_cf);
 
-  HDeadCodeElimination(graph).Run();
-  SSAChecker ssa_checker_dce(&allocator, graph);
-  ssa_checker_dce.Run();
-  ASSERT_TRUE(ssa_checker_dce.IsValid());
+    check_after_cf(graph_);
 
-  StringPrettyPrinter printer_after_dce(graph);
-  printer_after_dce.VisitInsertionOrder();
-  std::string actual_after_dce = printer_after_dce.str();
-  ASSERT_EQ(expected_after_dce, actual_after_dce);
-}
+    HDeadCodeElimination(graph_).Run();
+    SSAChecker ssa_checker_dce(graph_);
+    ssa_checker_dce.Run();
+    ASSERT_TRUE(ssa_checker_dce.IsValid());
 
+    StringPrettyPrinter printer_after_dce(graph_);
+    printer_after_dce.VisitInsertionOrder();
+    std::string actual_after_dce = printer_after_dce.str();
+    EXPECT_EQ(expected_after_dce, actual_after_dce);
+  }
+
+  ArenaPool pool_;
+  ArenaAllocator allocator_;
+  HGraph* graph_;
+};
 
 /**
  * Tiny three-register program exercising int constant folding on negation.
@@ -81,10 +101,10 @@ static void TestCode(const uint16_t* data,
  *                              offset
  *                              ------
  *     v0 <- 1                  0.      const/4 v0, #+1
- *     v1 <- -v0                1.      neg-int v0, v1
+ *     v1 <- -v0                1.      neg-int v1, v0
  *     return v1                2.      return v1
  */
-TEST(ConstantFolding, IntConstantFoldingNegation) {
+TEST_F(ConstantFoldingTest, IntConstantFoldingNegation) {
   const uint16_t data[] = TWO_REGISTERS_CODE_ITEM(
     Instruction::CONST_4 | 0 << 8 | 1 << 12,
     Instruction::NEG_INT | 1 << 8 | 0 << 12,
@@ -113,7 +133,7 @@ TEST(ConstantFolding, IntConstantFoldingNegation) {
 
   // Check the value of the computed constant.
   auto check_after_cf = [](HGraph* graph) {
-    HInstruction* inst = graph->GetBlock(1)->GetFirstInstruction()->InputAt(0);
+    HInstruction* inst = graph->GetBlocks()[1]->GetFirstInstruction()->InputAt(0);
     ASSERT_TRUE(inst->IsIntConstant());
     ASSERT_EQ(inst->AsIntConstant()->GetValue(), -1);
   };
@@ -132,6 +152,69 @@ TEST(ConstantFolding, IntConstantFoldingNegation) {
 }
 
 /**
+ * Tiny three-register program exercising long constant folding on negation.
+ *
+ *                              16-bit
+ *                              offset
+ *                              ------
+ *     (v0, v1) <- 4294967296   0.      const-wide v0 #+4294967296
+ *     (v2, v3) <- -(v0, v1)    1.      neg-long v2, v0
+ *     return (v2, v3)          2.      return-wide v2
+ */
+TEST_F(ConstantFoldingTest, LongConstantFoldingNegation) {
+  const int64_t input = INT64_C(4294967296);             // 2^32
+  const uint16_t word0 = Low16Bits(Low32Bits(input));    // LSW.
+  const uint16_t word1 = High16Bits(Low32Bits(input));
+  const uint16_t word2 = Low16Bits(High32Bits(input));
+  const uint16_t word3 = High16Bits(High32Bits(input));  // MSW.
+  const uint16_t data[] = FOUR_REGISTERS_CODE_ITEM(
+    Instruction::CONST_WIDE | 0 << 8, word0, word1, word2, word3,
+    Instruction::NEG_LONG | 2 << 8 | 0 << 12,
+    Instruction::RETURN_WIDE | 2 << 8);
+
+  std::string expected_before =
+      "BasicBlock 0, succ: 1\n"
+      "  4: LongConstant [7]\n"
+      "  12: SuspendCheck\n"
+      "  13: Goto 1\n"
+      "BasicBlock 1, pred: 0, succ: 2\n"
+      "  7: Neg(4) [10]\n"
+      "  10: Return(7)\n"
+      "BasicBlock 2, pred: 1\n"
+      "  11: Exit\n";
+
+  // Expected difference after constant folding.
+  diff_t expected_cf_diff = {
+    { "  4: LongConstant [7]\n", "  4: LongConstant\n" },
+    { "  12: SuspendCheck\n",    "  12: SuspendCheck\n"
+                                 "  14: LongConstant [10]\n" },
+    { "  7: Neg(4) [10]\n",      removed },
+    { "  10: Return(7)\n",       "  10: Return(14)\n" }
+  };
+  std::string expected_after_cf = Patch(expected_before, expected_cf_diff);
+
+  // Check the value of the computed constant.
+  auto check_after_cf = [](HGraph* graph) {
+    HInstruction* inst = graph->GetBlocks()[1]->GetFirstInstruction()->InputAt(0);
+    ASSERT_TRUE(inst->IsLongConstant());
+    ASSERT_EQ(inst->AsLongConstant()->GetValue(), INT64_C(-4294967296));
+  };
+
+  // Expected difference after dead code elimination.
+  diff_t expected_dce_diff = {
+    { "  4: LongConstant\n", removed },
+  };
+  std::string expected_after_dce = Patch(expected_after_cf, expected_dce_diff);
+
+  TestCode(data,
+           expected_before,
+           expected_after_cf,
+           expected_after_dce,
+           check_after_cf,
+           Primitive::kPrimLong);
+}
+
+/**
  * Tiny three-register program exercising int constant folding on addition.
  *
  *                              16-bit
@@ -142,7 +225,7 @@ TEST(ConstantFolding, IntConstantFoldingNegation) {
  *     v2 <- v0 + v1            2.      add-int v2, v0, v1
  *     return v2                4.      return v2
  */
-TEST(ConstantFolding, IntConstantFoldingOnAddition1) {
+TEST_F(ConstantFoldingTest, IntConstantFoldingOnAddition1) {
   const uint16_t data[] = THREE_REGISTERS_CODE_ITEM(
     Instruction::CONST_4 | 0 << 8 | 1 << 12,
     Instruction::CONST_4 | 1 << 8 | 2 << 12,
@@ -174,7 +257,7 @@ TEST(ConstantFolding, IntConstantFoldingOnAddition1) {
 
   // Check the value of the computed constant.
   auto check_after_cf = [](HGraph* graph) {
-    HInstruction* inst = graph->GetBlock(1)->GetFirstInstruction()->InputAt(0);
+    HInstruction* inst = graph->GetBlocks()[1]->GetFirstInstruction()->InputAt(0);
     ASSERT_TRUE(inst->IsIntConstant());
     ASSERT_EQ(inst->AsIntConstant()->GetValue(), 3);
   };
@@ -208,7 +291,7 @@ TEST(ConstantFolding, IntConstantFoldingOnAddition1) {
  *     v2 <- v0 + v1            6.      add-int v2, v0, v1
  *     return v2                8.      return v2
  */
-TEST(ConstantFolding, IntConstantFoldingOnAddition2) {
+TEST_F(ConstantFoldingTest, IntConstantFoldingOnAddition2) {
   const uint16_t data[] = THREE_REGISTERS_CODE_ITEM(
     Instruction::CONST_4 | 0 << 8 | 1 << 12,
     Instruction::CONST_4 | 1 << 8 | 2 << 12,
@@ -254,7 +337,7 @@ TEST(ConstantFolding, IntConstantFoldingOnAddition2) {
 
   // Check the values of the computed constants.
   auto check_after_cf = [](HGraph* graph) {
-    HInstruction* inst1 = graph->GetBlock(1)->GetFirstInstruction()->InputAt(0);
+    HInstruction* inst1 = graph->GetBlocks()[1]->GetFirstInstruction()->InputAt(0);
     ASSERT_TRUE(inst1->IsIntConstant());
     ASSERT_EQ(inst1->AsIntConstant()->GetValue(), 12);
     HInstruction* inst2 = inst1->GetPrevious();
@@ -294,7 +377,7 @@ TEST(ConstantFolding, IntConstantFoldingOnAddition2) {
  *     v2 <- v0 - v1            2.      sub-int v2, v0, v1
  *     return v2                4.      return v2
  */
-TEST(ConstantFolding, IntConstantFoldingOnSubtraction) {
+TEST_F(ConstantFoldingTest, IntConstantFoldingOnSubtraction) {
   const uint16_t data[] = THREE_REGISTERS_CODE_ITEM(
     Instruction::CONST_4 | 0 << 8 | 3 << 12,
     Instruction::CONST_4 | 1 << 8 | 2 << 12,
@@ -326,7 +409,7 @@ TEST(ConstantFolding, IntConstantFoldingOnSubtraction) {
 
   // Check the value of the computed constant.
   auto check_after_cf = [](HGraph* graph) {
-    HInstruction* inst = graph->GetBlock(1)->GetFirstInstruction()->InputAt(0);
+    HInstruction* inst = graph->GetBlocks()[1]->GetFirstInstruction()->InputAt(0);
     ASSERT_TRUE(inst->IsIntConstant());
     ASSERT_EQ(inst->AsIntConstant()->GetValue(), 1);
   };
@@ -358,7 +441,7 @@ TEST(ConstantFolding, IntConstantFoldingOnSubtraction) {
  *       (v0, v1) + (v1, v2)    4.      add-long v4, v0, v2
  *     return (v4, v5)          6.      return-wide v4
  */
-TEST(ConstantFolding, LongConstantFoldingOnAddition) {
+TEST_F(ConstantFoldingTest, LongConstantFoldingOnAddition) {
   const uint16_t data[] = SIX_REGISTERS_CODE_ITEM(
     Instruction::CONST_WIDE_16 | 0 << 8, 1,
     Instruction::CONST_WIDE_16 | 2 << 8, 2,
@@ -390,7 +473,7 @@ TEST(ConstantFolding, LongConstantFoldingOnAddition) {
 
   // Check the value of the computed constant.
   auto check_after_cf = [](HGraph* graph) {
-    HInstruction* inst = graph->GetBlock(1)->GetFirstInstruction()->InputAt(0);
+    HInstruction* inst = graph->GetBlocks()[1]->GetFirstInstruction()->InputAt(0);
     ASSERT_TRUE(inst->IsLongConstant());
     ASSERT_EQ(inst->AsLongConstant()->GetValue(), 3);
   };
@@ -423,7 +506,7 @@ TEST(ConstantFolding, LongConstantFoldingOnAddition) {
  *       (v0, v1) - (v1, v2)    4.      sub-long v4, v0, v2
  *     return (v4, v5)          6.      return-wide v4
  */
-TEST(ConstantFolding, LongConstantFoldingOnSubtraction) {
+TEST_F(ConstantFoldingTest, LongConstantFoldingOnSubtraction) {
   const uint16_t data[] = SIX_REGISTERS_CODE_ITEM(
     Instruction::CONST_WIDE_16 | 0 << 8, 3,
     Instruction::CONST_WIDE_16 | 2 << 8, 2,
@@ -455,7 +538,7 @@ TEST(ConstantFolding, LongConstantFoldingOnSubtraction) {
 
   // Check the value of the computed constant.
   auto check_after_cf = [](HGraph* graph) {
-    HInstruction* inst = graph->GetBlock(1)->GetFirstInstruction()->InputAt(0);
+    HInstruction* inst = graph->GetBlocks()[1]->GetFirstInstruction()->InputAt(0);
     ASSERT_TRUE(inst->IsLongConstant());
     ASSERT_EQ(inst->AsLongConstant()->GetValue(), 1);
   };
@@ -497,7 +580,7 @@ TEST(ConstantFolding, LongConstantFoldingOnSubtraction) {
  * L3: v2 <- v1 + 8             11.     add-int/lit16 v2, v1, #+8
  *     return v2                13.     return v2
  */
-TEST(ConstantFolding, IntConstantFoldingAndJumps) {
+TEST_F(ConstantFoldingTest, IntConstantFoldingAndJumps) {
   const uint16_t data[] = THREE_REGISTERS_CODE_ITEM(
     Instruction::CONST_4 | 0 << 8 | 1 << 12,
     Instruction::CONST_4 | 1 << 8 | 2 << 12,
@@ -506,7 +589,7 @@ TEST(ConstantFolding, IntConstantFoldingAndJumps) {
     Instruction::ADD_INT_LIT16 | 1 << 8 | 0 << 12, 5,
     Instruction::GOTO | 4 << 8,
     Instruction::ADD_INT_LIT16 | 0 << 8 | 2 << 12, 4,
-    static_cast<uint16_t>(Instruction::GOTO | -5 << 8),
+    static_cast<uint16_t>(Instruction::GOTO | 0xFFFFFFFB << 8),
     Instruction::ADD_INT_LIT16 | 2 << 8 | 1 << 12, 8,
     Instruction::RETURN | 2 << 8);
 
@@ -557,7 +640,7 @@ TEST(ConstantFolding, IntConstantFoldingAndJumps) {
 
   // Check the values of the computed constants.
   auto check_after_cf = [](HGraph* graph) {
-    HInstruction* inst1 = graph->GetBlock(4)->GetFirstInstruction()->InputAt(0);
+    HInstruction* inst1 = graph->GetBlocks()[4]->GetFirstInstruction()->InputAt(0);
     ASSERT_TRUE(inst1->IsIntConstant());
     ASSERT_EQ(inst1->AsIntConstant()->GetValue(), 20);
     HInstruction* inst2 = inst1->GetPrevious();
@@ -593,7 +676,6 @@ TEST(ConstantFolding, IntConstantFoldingAndJumps) {
            check_after_cf);
 }
 
-
 /**
  * Three-register program with a constant (static) condition.
  *
@@ -607,7 +689,7 @@ TEST(ConstantFolding, IntConstantFoldingAndJumps) {
  * L1: v2 <- v0 + v1            5.      add-int v2, v0, v1
  *     return-void              7.      return
  */
-TEST(ConstantFolding, ConstantCondition) {
+TEST_F(ConstantFoldingTest, ConstantCondition) {
   const uint16_t data[] = THREE_REGISTERS_CODE_ITEM(
     Instruction::CONST_4 | 1 << 8 | 1 << 12,
     Instruction::CONST_4 | 0 << 8 | 0 << 12,
@@ -647,7 +729,7 @@ TEST(ConstantFolding, ConstantCondition) {
 
   // Check the values of the computed constants.
   auto check_after_cf = [](HGraph* graph) {
-    HInstruction* inst = graph->GetBlock(1)->GetFirstInstruction()->InputAt(0);
+    HInstruction* inst = graph->GetBlocks()[1]->GetFirstInstruction()->InputAt(0);
     ASSERT_TRUE(inst->IsIntConstant());
     ASSERT_EQ(inst->AsIntConstant()->GetValue(), 1);
   };
@@ -667,6 +749,111 @@ TEST(ConstantFolding, ConstantCondition) {
            expected_after_cf,
            expected_after_dce,
            check_after_cf);
+}
+
+/**
+ * Unsigned comparisons with zero. Since these instructions are not present
+ * in the bytecode, we need to set up the graph explicitly.
+ */
+TEST_F(ConstantFoldingTest, UnsignedComparisonsWithZero) {
+  graph_ = CreateGraph(&allocator_);
+  HBasicBlock* entry_block = new (&allocator_) HBasicBlock(graph_);
+  graph_->AddBlock(entry_block);
+  graph_->SetEntryBlock(entry_block);
+  HBasicBlock* block = new (&allocator_) HBasicBlock(graph_);
+  graph_->AddBlock(block);
+  HBasicBlock* exit_block = new (&allocator_) HBasicBlock(graph_);
+  graph_->AddBlock(exit_block);
+  graph_->SetExitBlock(exit_block);
+  entry_block->AddSuccessor(block);
+  block->AddSuccessor(exit_block);
+
+  // Make various unsigned comparisons with zero against a parameter.
+  HInstruction* parameter = new (&allocator_) HParameterValue(
+      graph_->GetDexFile(), 0, 0, Primitive::kPrimInt, true);
+  entry_block->AddInstruction(parameter);
+  HInstruction* zero = graph_->GetIntConstant(0);
+  HInstruction* last;
+  block->AddInstruction(last = new (&allocator_) HAbove(zero, parameter));
+  block->AddInstruction(new (&allocator_) HDeoptimize(last, 0));
+  block->AddInstruction(last = new (&allocator_) HAbove(parameter, zero));
+  block->AddInstruction(new (&allocator_) HDeoptimize(last, 0));
+  block->AddInstruction(last = new (&allocator_) HAboveOrEqual(zero, parameter));
+  block->AddInstruction(new (&allocator_) HDeoptimize(last, 0));
+  block->AddInstruction(last = new (&allocator_) HAboveOrEqual(parameter, zero));
+  block->AddInstruction(new (&allocator_) HDeoptimize(last, 0));
+  block->AddInstruction(last = new (&allocator_) HBelow(zero, parameter));
+  block->AddInstruction(new (&allocator_) HDeoptimize(last, 0));
+  block->AddInstruction(last = new (&allocator_) HBelow(parameter, zero));
+  block->AddInstruction(new (&allocator_) HDeoptimize(last, 0));
+  block->AddInstruction(last = new (&allocator_) HBelowOrEqual(zero, parameter));
+  block->AddInstruction(new (&allocator_) HDeoptimize(last, 0));
+  block->AddInstruction(last = new (&allocator_) HBelowOrEqual(parameter, zero));
+  block->AddInstruction(new (&allocator_) HDeoptimize(last, 0));
+
+  entry_block->AddInstruction(new (&allocator_) HGoto());
+  block->AddInstruction(new (&allocator_) HReturn(zero));
+  exit_block->AddInstruction(new (&allocator_) HExit());
+
+  const std::string expected_before =
+      "BasicBlock 0, succ: 1\n"
+      "  0: ParameterValue [16, 14, 12, 10, 8, 6, 4, 2]\n"
+      "  1: IntConstant [19, 16, 14, 12, 10, 8, 6, 4, 2]\n"
+      "  18: Goto 1\n"
+      "BasicBlock 1, pred: 0, succ: 2\n"
+      "  2: Above(1, 0) [3]\n"
+      "  3: Deoptimize(2)\n"
+      "  4: Above(0, 1) [5]\n"
+      "  5: Deoptimize(4)\n"
+      "  6: AboveOrEqual(1, 0) [7]\n"
+      "  7: Deoptimize(6)\n"
+      "  8: AboveOrEqual(0, 1) [9]\n"
+      "  9: Deoptimize(8)\n"
+      "  10: Below(1, 0) [11]\n"
+      "  11: Deoptimize(10)\n"
+      "  12: Below(0, 1) [13]\n"
+      "  13: Deoptimize(12)\n"
+      "  14: BelowOrEqual(1, 0) [15]\n"
+      "  15: Deoptimize(14)\n"
+      "  16: BelowOrEqual(0, 1) [17]\n"
+      "  17: Deoptimize(16)\n"
+      "  19: Return(1)\n"
+      "BasicBlock 2, pred: 1\n"
+      "  20: Exit\n";
+
+  const std::string expected_after_cf =
+      "BasicBlock 0, succ: 1\n"
+      "  0: ParameterValue [16, 10, 6, 4]\n"
+      "  1: IntConstant [13, 3, 19, 16, 10, 6, 4]\n"
+      "  21: IntConstant [15, 9]\n"
+      "  18: Goto 1\n"
+      "BasicBlock 1, pred: 0, succ: 2\n"
+      "  3: Deoptimize(1)\n"
+      "  4: Above(0, 1) [5]\n"
+      "  5: Deoptimize(4)\n"
+      "  6: AboveOrEqual(1, 0) [7]\n"
+      "  7: Deoptimize(6)\n"
+      "  9: Deoptimize(21)\n"
+      "  10: Below(1, 0) [11]\n"
+      "  11: Deoptimize(10)\n"
+      "  13: Deoptimize(1)\n"
+      "  15: Deoptimize(21)\n"
+      "  16: BelowOrEqual(0, 1) [17]\n"
+      "  17: Deoptimize(16)\n"
+      "  19: Return(1)\n"
+      "BasicBlock 2, pred: 1\n"
+      "  20: Exit\n";
+
+  const std::string expected_after_dce = expected_after_cf;
+
+  auto check_after_cf = [](HGraph* graph) {
+    CHECK(graph != nullptr);
+  };
+
+  TestCodeOnReadyGraph(expected_before,
+                       expected_after_cf,
+                       expected_after_dce,
+                       check_after_cf);
 }
 
 }  // namespace art

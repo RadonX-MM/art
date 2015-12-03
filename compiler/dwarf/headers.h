@@ -25,6 +25,7 @@
 #include "dwarf/dwarf_constants.h"
 #include "dwarf/register.h"
 #include "dwarf/writer.h"
+#include "utils/array_ref.h"
 
 namespace art {
 namespace dwarf {
@@ -36,69 +37,84 @@ namespace dwarf {
 // In particular, it is not related to machine architecture.
 
 // Write common information entry (CIE) to .debug_frame or .eh_frame section.
-template<typename Allocator>
-void WriteDebugFrameCIE(bool is64bit,
-                        ExceptionHeaderValueApplication address_type,
-                        Reg return_address_register,
-                        const DebugFrameOpCodeWriter<Allocator>& opcodes,
-                        CFIFormat format,
-                        std::vector<uint8_t>* debug_frame) {
-  Writer<> writer(debug_frame);
+template<typename Vector>
+void WriteCIE(bool is64bit,
+              Reg return_address_register,
+              const DebugFrameOpCodeWriter<Vector>& opcodes,
+              CFIFormat format,
+              std::vector<uint8_t>* buffer) {
+  static_assert(std::is_same<typename Vector::value_type, uint8_t>::value, "Invalid value type");
+
+  Writer<> writer(buffer);
   size_t cie_header_start_ = writer.data()->size();
   writer.PushUint32(0);  // Length placeholder.
   writer.PushUint32((format == DW_EH_FRAME_FORMAT) ? 0 : 0xFFFFFFFF);  // CIE id.
   writer.PushUint8(1);   // Version.
   writer.PushString("zR");
-  writer.PushUleb128(DebugFrameOpCodeWriter<Allocator>::kCodeAlignmentFactor);
-  writer.PushSleb128(DebugFrameOpCodeWriter<Allocator>::kDataAlignmentFactor);
+  writer.PushUleb128(DebugFrameOpCodeWriter<Vector>::kCodeAlignmentFactor);
+  writer.PushSleb128(DebugFrameOpCodeWriter<Vector>::kDataAlignmentFactor);
   writer.PushUleb128(return_address_register.num());  // ubyte in DWARF2.
   writer.PushUleb128(1);  // z: Augmentation data size.
   if (is64bit) {
-    if (address_type == DW_EH_PE_pcrel) {
+    if (format == DW_EH_FRAME_FORMAT) {
       writer.PushUint8(DW_EH_PE_pcrel | DW_EH_PE_sdata8);   // R: Pointer encoding.
     } else {
-      DCHECK(address_type == DW_EH_PE_absptr);
+      DCHECK(format == DW_DEBUG_FRAME_FORMAT);
       writer.PushUint8(DW_EH_PE_absptr | DW_EH_PE_udata8);  // R: Pointer encoding.
     }
   } else {
-    if (address_type == DW_EH_PE_pcrel) {
+    if (format == DW_EH_FRAME_FORMAT) {
       writer.PushUint8(DW_EH_PE_pcrel | DW_EH_PE_sdata4);   // R: Pointer encoding.
     } else {
-      DCHECK(address_type == DW_EH_PE_absptr);
+      DCHECK(format == DW_DEBUG_FRAME_FORMAT);
       writer.PushUint8(DW_EH_PE_absptr | DW_EH_PE_udata4);  // R: Pointer encoding.
     }
   }
-  writer.PushData(opcodes.data());
+  writer.PushData(*opcodes.data());
   writer.Pad(is64bit ? 8 : 4);
   writer.UpdateUint32(cie_header_start_, writer.data()->size() - cie_header_start_ - 4);
 }
 
 // Write frame description entry (FDE) to .debug_frame or .eh_frame section.
-template<typename Allocator>
-void WriteDebugFrameFDE(bool is64bit, size_t cie_offset,
-                        uint64_t initial_address, uint64_t address_range,
-                        const std::vector<uint8_t, Allocator>* opcodes,
-                        CFIFormat format,
-                        std::vector<uint8_t>* debug_frame,
-                        std::vector<uintptr_t>* debug_frame_patches) {
-  Writer<> writer(debug_frame);
+inline
+void WriteFDE(bool is64bit,
+              uint64_t section_address,  // Absolute address of the section.
+              uint64_t cie_address,  // Absolute address of last CIE.
+              uint64_t code_address,
+              uint64_t code_size,
+              const ArrayRef<const uint8_t>& opcodes,
+              CFIFormat format,
+              uint64_t buffer_address,  // Address of buffer in linked application.
+              std::vector<uint8_t>* buffer,
+              std::vector<uintptr_t>* patch_locations) {
+  CHECK_GE(cie_address, section_address);
+  CHECK_GE(buffer_address, section_address);
+
+  Writer<> writer(buffer);
   size_t fde_header_start = writer.data()->size();
   writer.PushUint32(0);  // Length placeholder.
   if (format == DW_EH_FRAME_FORMAT) {
-    uint32_t cie_pointer = writer.data()->size() - cie_offset;
+    uint32_t cie_pointer = (buffer_address + buffer->size()) - cie_address;
     writer.PushUint32(cie_pointer);
   } else {
-    uint32_t cie_pointer = cie_offset;
+    DCHECK(format == DW_DEBUG_FRAME_FORMAT);
+    uint32_t cie_pointer = cie_address - section_address;
     writer.PushUint32(cie_pointer);
   }
-  // Relocate initial_address, but not address_range (it is size).
-  debug_frame_patches->push_back(writer.data()->size());
-  if (is64bit) {
-    writer.PushUint64(initial_address);
-    writer.PushUint64(address_range);
+  if (format == DW_EH_FRAME_FORMAT) {
+    // .eh_frame encodes the location as relative address.
+    code_address -= buffer_address + buffer->size();
   } else {
-    writer.PushUint32(initial_address);
-    writer.PushUint32(address_range);
+    DCHECK(format == DW_DEBUG_FRAME_FORMAT);
+    // Relocate code_address if it has absolute value.
+    patch_locations->push_back(buffer_address + buffer->size() - section_address);
+  }
+  if (is64bit) {
+    writer.PushUint64(code_address);
+    writer.PushUint64(code_size);
+  } else {
+    writer.PushUint32(code_address);
+    writer.PushUint32(code_size);
   }
   writer.PushUleb128(0);  // Augmentation data size.
   writer.PushData(opcodes);
@@ -107,23 +123,27 @@ void WriteDebugFrameFDE(bool is64bit, size_t cie_offset,
 }
 
 // Write compilation unit (CU) to .debug_info section.
-template<typename Allocator>
+template<typename Vector>
 void WriteDebugInfoCU(uint32_t debug_abbrev_offset,
-                      const DebugInfoEntryWriter<Allocator>& entries,
+                      const DebugInfoEntryWriter<Vector>& entries,
+                      size_t debug_info_offset,  // offset from start of .debug_info.
                       std::vector<uint8_t>* debug_info,
                       std::vector<uintptr_t>* debug_info_patches) {
+  static_assert(std::is_same<typename Vector::value_type, uint8_t>::value, "Invalid value type");
+
   Writer<> writer(debug_info);
   size_t start = writer.data()->size();
   writer.PushUint32(0);  // Length placeholder.
-  writer.PushUint16(3);  // Version.
+  writer.PushUint16(4);  // Version.
   writer.PushUint32(debug_abbrev_offset);
   writer.PushUint8(entries.Is64bit() ? 8 : 4);
   size_t entries_offset = writer.data()->size();
-  writer.PushData(entries.data());
+  DCHECK_EQ(entries_offset, DebugInfoEntryWriter<Vector>::kCompilationUnitHeaderSize);
+  writer.PushData(*entries.data());
   writer.UpdateUint32(start, writer.data()->size() - start - 4);
   // Copy patch locations and make them relative to .debug_info section.
   for (uintptr_t patch_location : entries.GetPatchLocations()) {
-    debug_info_patches->push_back(entries_offset + patch_location);
+    debug_info_patches->push_back(debug_info_offset + entries_offset + patch_location);
   }
 }
 
@@ -135,29 +155,29 @@ struct FileEntry {
 };
 
 // Write line table to .debug_line section.
-template<typename Allocator>
+template<typename Vector>
 void WriteDebugLineTable(const std::vector<std::string>& include_directories,
                          const std::vector<FileEntry>& files,
-                         const DebugLineOpCodeWriter<Allocator>& opcodes,
+                         const DebugLineOpCodeWriter<Vector>& opcodes,
+                         size_t debug_line_offset,  // offset from start of .debug_line.
                          std::vector<uint8_t>* debug_line,
                          std::vector<uintptr_t>* debug_line_patches) {
+  static_assert(std::is_same<typename Vector::value_type, uint8_t>::value, "Invalid value type");
+
   Writer<> writer(debug_line);
   size_t header_start = writer.data()->size();
   writer.PushUint32(0);  // Section-length placeholder.
-  // Claim DWARF-2 version even though we use some DWARF-3 features.
-  // DWARF-2 consumers will ignore the unknown opcodes.
-  // This is what clang currently does.
-  writer.PushUint16(2);  // .debug_line version.
+  writer.PushUint16(3);  // .debug_line version.
   size_t header_length_pos = writer.data()->size();
   writer.PushUint32(0);  // Header-length placeholder.
   writer.PushUint8(1 << opcodes.GetCodeFactorBits());
-  writer.PushUint8(DebugLineOpCodeWriter<Allocator>::kDefaultIsStmt ? 1 : 0);
-  writer.PushInt8(DebugLineOpCodeWriter<Allocator>::kLineBase);
-  writer.PushUint8(DebugLineOpCodeWriter<Allocator>::kLineRange);
-  writer.PushUint8(DebugLineOpCodeWriter<Allocator>::kOpcodeBase);
-  static const int opcode_lengths[DebugLineOpCodeWriter<Allocator>::kOpcodeBase] = {
+  writer.PushUint8(DebugLineOpCodeWriter<Vector>::kDefaultIsStmt ? 1 : 0);
+  writer.PushInt8(DebugLineOpCodeWriter<Vector>::kLineBase);
+  writer.PushUint8(DebugLineOpCodeWriter<Vector>::kLineRange);
+  writer.PushUint8(DebugLineOpCodeWriter<Vector>::kOpcodeBase);
+  static const int opcode_lengths[DebugLineOpCodeWriter<Vector>::kOpcodeBase] = {
       0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1 };
-  for (int i = 1; i < DebugLineOpCodeWriter<Allocator>::kOpcodeBase; i++) {
+  for (int i = 1; i < DebugLineOpCodeWriter<Vector>::kOpcodeBase; i++) {
     writer.PushUint8(opcode_lengths[i]);
   }
   for (const std::string& directory : include_directories) {
@@ -173,11 +193,11 @@ void WriteDebugLineTable(const std::vector<std::string>& include_directories,
   writer.PushUint8(0);  // Terminate file list.
   writer.UpdateUint32(header_length_pos, writer.data()->size() - header_length_pos - 4);
   size_t opcodes_offset = writer.data()->size();
-  writer.PushData(opcodes.data());
+  writer.PushData(*opcodes.data());
   writer.UpdateUint32(header_start, writer.data()->size() - header_start - 4);
   // Copy patch locations and make them relative to .debug_line section.
   for (uintptr_t patch_location : opcodes.GetPatchLocations()) {
-    debug_line_patches->push_back(opcodes_offset + patch_location);
+    debug_line_patches->push_back(debug_line_offset + opcodes_offset + patch_location);
   }
 }
 

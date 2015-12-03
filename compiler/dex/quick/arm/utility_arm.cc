@@ -422,20 +422,26 @@ LIR* ArmMir2Lir::OpRegReg(OpKind op, RegStorage r_dest_src1, RegStorage r_src2) 
   return OpRegRegShift(op, r_dest_src1, r_src2, 0);
 }
 
-LIR* ArmMir2Lir::OpMovRegMem(RegStorage r_dest, RegStorage r_base, int offset, MoveType move_type) {
-  UNUSED(r_dest, r_base, offset, move_type);
+LIR* ArmMir2Lir::OpMovRegMem(RegStorage r_dest ATTRIBUTE_UNUSED,
+                             RegStorage r_base ATTRIBUTE_UNUSED,
+                             int offset ATTRIBUTE_UNUSED,
+                             MoveType move_type ATTRIBUTE_UNUSED) {
   UNIMPLEMENTED(FATAL);
   UNREACHABLE();
 }
 
-LIR* ArmMir2Lir::OpMovMemReg(RegStorage r_base, int offset, RegStorage r_src, MoveType move_type) {
-  UNUSED(r_base, offset, r_src, move_type);
+LIR* ArmMir2Lir::OpMovMemReg(RegStorage r_base ATTRIBUTE_UNUSED,
+                             int offset ATTRIBUTE_UNUSED,
+                             RegStorage r_src ATTRIBUTE_UNUSED,
+                             MoveType move_type ATTRIBUTE_UNUSED) {
   UNIMPLEMENTED(FATAL);
   UNREACHABLE();
 }
 
-LIR* ArmMir2Lir::OpCondRegReg(OpKind op, ConditionCode cc, RegStorage r_dest, RegStorage r_src) {
-  UNUSED(op, cc, r_dest, r_src);
+LIR* ArmMir2Lir::OpCondRegReg(OpKind op ATTRIBUTE_UNUSED,
+                              ConditionCode cc ATTRIBUTE_UNUSED,
+                              RegStorage r_dest ATTRIBUTE_UNUSED,
+                              RegStorage r_src ATTRIBUTE_UNUSED) {
   LOG(FATAL) << "Unexpected use of OpCondRegReg for Arm";
   UNREACHABLE();
 }
@@ -883,7 +889,7 @@ LIR* ArmMir2Lir::StoreBaseIndexed(RegStorage r_base, RegStorage r_index, RegStor
 LIR* ArmMir2Lir::LoadStoreUsingInsnWithOffsetImm8Shl2(ArmOpcode opcode, RegStorage r_base,
                                                       int displacement, RegStorage r_src_dest,
                                                       RegStorage r_work) {
-  DCHECK_EQ(displacement & 3, 0);
+  DCHECK_ALIGNED(displacement, 4);
   constexpr int kOffsetMask = 0xff << 2;
   int encoded_disp = (displacement & kOffsetMask) >> 2;  // Within range of the instruction.
   RegStorage r_ptr = r_base;
@@ -945,7 +951,7 @@ LIR* ArmMir2Lir::LoadBaseDispBody(RegStorage r_base, int displacement, RegStorag
         already_generated = true;
         break;
       }
-      DCHECK_EQ((displacement & 0x3), 0);
+      DCHECK_ALIGNED(displacement, 4);
       scale = 2;
       if (r_dest.Low8() && (r_base == rs_rARM_PC) && (displacement <= 1020) &&
           (displacement >= 0)) {
@@ -962,14 +968,14 @@ LIR* ArmMir2Lir::LoadBaseDispBody(RegStorage r_base, int displacement, RegStorag
       }
       break;
     case kUnsignedHalf:
-      DCHECK_EQ((displacement & 0x1), 0);
+      DCHECK_ALIGNED(displacement, 2);
       scale = 1;
       short_form = all_low && (displacement >> (5 + scale)) == 0;
       opcode16 = kThumbLdrhRRI5;
       opcode32 = kThumb2LdrhRRI12;
       break;
     case kSignedHalf:
-      DCHECK_EQ((displacement & 0x1), 0);
+      DCHECK_ALIGNED(displacement, 2);
       scale = 1;
       DCHECK_EQ(opcode16, kThumbBkpt);  // Not available.
       opcode32 = kThumb2LdrshRRI12;
@@ -1099,7 +1105,7 @@ LIR* ArmMir2Lir::StoreBaseDispBody(RegStorage r_base, int displacement, RegStora
         already_generated = true;
         break;
       }
-      DCHECK_EQ((displacement & 0x3), 0);
+      DCHECK_ALIGNED(displacement, 4);
       scale = 2;
       if (r_src.Low8() && (r_base == rs_r13sp) && (displacement <= 1020) && (displacement >= 0)) {
         short_form = true;
@@ -1112,7 +1118,7 @@ LIR* ArmMir2Lir::StoreBaseDispBody(RegStorage r_base, int displacement, RegStora
       break;
     case kUnsignedHalf:
     case kSignedHalf:
-      DCHECK_EQ((displacement & 0x1), 0);
+      DCHECK_ALIGNED(displacement, 2);
       scale = 1;
       short_form = all_low && (displacement >> (5 + scale)) == 0;
       opcode16 = kThumbStrhRRI5;
@@ -1246,14 +1252,17 @@ LIR* ArmMir2Lir::OpFpRegCopy(RegStorage r_dest, RegStorage r_src) {
   return res;
 }
 
-LIR* ArmMir2Lir::OpMem(OpKind op, RegStorage r_base, int disp) {
-  UNUSED(op, r_base, disp);
+LIR* ArmMir2Lir::OpMem(OpKind op ATTRIBUTE_UNUSED,
+                       RegStorage r_base ATTRIBUTE_UNUSED,
+                       int disp ATTRIBUTE_UNUSED) {
   LOG(FATAL) << "Unexpected use of OpMem for Arm";
   UNREACHABLE();
 }
 
-LIR* ArmMir2Lir::InvokeTrampoline(OpKind op, RegStorage r_tgt, QuickEntrypointEnum trampoline) {
-  UNUSED(trampoline);  // The address of the trampoline is already loaded into r_tgt.
+LIR* ArmMir2Lir::InvokeTrampoline(OpKind op,
+                                  RegStorage r_tgt,
+                                  // The address of the trampoline is already loaded into r_tgt.
+                                  QuickEntrypointEnum trampoline ATTRIBUTE_UNUSED) {
   return OpReg(op, r_tgt);
 }
 

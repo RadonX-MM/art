@@ -14,20 +14,22 @@
  * limitations under the License.
  */
 
+#include <stdint.h>
+
 #include "art_field-inl.h"
 #include "art_method-inl.h"
 #include "callee_save_frame.h"
 #include "dex_file-inl.h"
 #include "entrypoints/entrypoint_utils-inl.h"
+#include "gc_root-inl.h"
 #include "mirror/class-inl.h"
-
-#include <stdint.h>
+#include "mirror/object_reference.h"
 
 namespace art {
 
 extern "C" int8_t artGetByteStaticFromCode(uint32_t field_idx, ArtMethod* referrer,
                                            Thread* self)
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    SHARED_REQUIRES(Locks::mutator_lock_) {
   ScopedQuickEntrypointChecks sqec(self);
   ArtField* field = FindFieldFast(field_idx, referrer, StaticPrimitiveRead, sizeof(int8_t));
   if (LIKELY(field != nullptr)) {
@@ -42,7 +44,7 @@ extern "C" int8_t artGetByteStaticFromCode(uint32_t field_idx, ArtMethod* referr
 
 extern "C" uint8_t artGetBooleanStaticFromCode(uint32_t field_idx, ArtMethod* referrer,
                                                Thread* self)
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    SHARED_REQUIRES(Locks::mutator_lock_) {
   ScopedQuickEntrypointChecks sqec(self);
   ArtField* field = FindFieldFast(field_idx, referrer, StaticPrimitiveRead, sizeof(int8_t));
   if (LIKELY(field != nullptr)) {
@@ -57,7 +59,7 @@ extern "C" uint8_t artGetBooleanStaticFromCode(uint32_t field_idx, ArtMethod* re
 
 extern "C" int16_t artGetShortStaticFromCode(uint32_t field_idx, ArtMethod* referrer,
                                              Thread* self)
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    SHARED_REQUIRES(Locks::mutator_lock_) {
   ScopedQuickEntrypointChecks sqec(self);
   ArtField* field = FindFieldFast(field_idx, referrer, StaticPrimitiveRead, sizeof(int16_t));
   if (LIKELY(field != nullptr)) {
@@ -73,7 +75,7 @@ extern "C" int16_t artGetShortStaticFromCode(uint32_t field_idx, ArtMethod* refe
 extern "C" uint16_t artGetCharStaticFromCode(uint32_t field_idx,
                                              ArtMethod* referrer,
                                              Thread* self)
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    SHARED_REQUIRES(Locks::mutator_lock_) {
   ScopedQuickEntrypointChecks sqec(self);
   ArtField* field = FindFieldFast(field_idx, referrer, StaticPrimitiveRead, sizeof(int16_t));
   if (LIKELY(field != nullptr)) {
@@ -89,7 +91,7 @@ extern "C" uint16_t artGetCharStaticFromCode(uint32_t field_idx,
 extern "C" uint32_t artGet32StaticFromCode(uint32_t field_idx,
                                            ArtMethod* referrer,
                                            Thread* self)
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    SHARED_REQUIRES(Locks::mutator_lock_) {
   ScopedQuickEntrypointChecks sqec(self);
   ArtField* field = FindFieldFast(field_idx, referrer, StaticPrimitiveRead, sizeof(int32_t));
   if (LIKELY(field != nullptr)) {
@@ -105,7 +107,7 @@ extern "C" uint32_t artGet32StaticFromCode(uint32_t field_idx,
 extern "C" uint64_t artGet64StaticFromCode(uint32_t field_idx,
                                            ArtMethod* referrer,
                                            Thread* self)
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    SHARED_REQUIRES(Locks::mutator_lock_) {
   ScopedQuickEntrypointChecks sqec(self);
   ArtField* field = FindFieldFast(field_idx, referrer, StaticPrimitiveRead, sizeof(int64_t));
   if (LIKELY(field != nullptr)) {
@@ -121,7 +123,7 @@ extern "C" uint64_t artGet64StaticFromCode(uint32_t field_idx,
 extern "C" mirror::Object* artGetObjStaticFromCode(uint32_t field_idx,
                                                    ArtMethod* referrer,
                                                    Thread* self)
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    SHARED_REQUIRES(Locks::mutator_lock_) {
   ScopedQuickEntrypointChecks sqec(self);
   ArtField* field = FindFieldFast(field_idx, referrer, StaticObjectRead,
                                   sizeof(mirror::HeapReference<mirror::Object>));
@@ -138,7 +140,7 @@ extern "C" mirror::Object* artGetObjStaticFromCode(uint32_t field_idx,
 
 extern "C" int8_t artGetByteInstanceFromCode(uint32_t field_idx, mirror::Object* obj,
                                              ArtMethod* referrer, Thread* self)
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    SHARED_REQUIRES(Locks::mutator_lock_) {
   ScopedQuickEntrypointChecks sqec(self);
   ArtField* field = FindFieldFast(field_idx, referrer, InstancePrimitiveRead, sizeof(int8_t));
   if (LIKELY(field != nullptr && obj != nullptr)) {
@@ -158,7 +160,7 @@ extern "C" int8_t artGetByteInstanceFromCode(uint32_t field_idx, mirror::Object*
 
 extern "C" uint8_t artGetBooleanInstanceFromCode(uint32_t field_idx, mirror::Object* obj,
                                                  ArtMethod* referrer, Thread* self)
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    SHARED_REQUIRES(Locks::mutator_lock_) {
   ScopedQuickEntrypointChecks sqec(self);
   ArtField* field = FindFieldFast(field_idx, referrer, InstancePrimitiveRead, sizeof(int8_t));
   if (LIKELY(field != nullptr && obj != nullptr)) {
@@ -177,7 +179,7 @@ extern "C" uint8_t artGetBooleanInstanceFromCode(uint32_t field_idx, mirror::Obj
 }
 extern "C" int16_t artGetShortInstanceFromCode(uint32_t field_idx, mirror::Object* obj,
                                                ArtMethod* referrer, Thread* self)
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    SHARED_REQUIRES(Locks::mutator_lock_) {
   ScopedQuickEntrypointChecks sqec(self);
   ArtField* field = FindFieldFast(field_idx, referrer, InstancePrimitiveRead, sizeof(int16_t));
   if (LIKELY(field != nullptr && obj != nullptr)) {
@@ -197,7 +199,7 @@ extern "C" int16_t artGetShortInstanceFromCode(uint32_t field_idx, mirror::Objec
 
 extern "C" uint16_t artGetCharInstanceFromCode(uint32_t field_idx, mirror::Object* obj,
                                                ArtMethod* referrer, Thread* self)
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    SHARED_REQUIRES(Locks::mutator_lock_) {
   ScopedQuickEntrypointChecks sqec(self);
   ArtField* field = FindFieldFast(field_idx, referrer, InstancePrimitiveRead, sizeof(int16_t));
   if (LIKELY(field != nullptr && obj != nullptr)) {
@@ -217,7 +219,7 @@ extern "C" uint16_t artGetCharInstanceFromCode(uint32_t field_idx, mirror::Objec
 
 extern "C" uint32_t artGet32InstanceFromCode(uint32_t field_idx, mirror::Object* obj,
                                              ArtMethod* referrer, Thread* self)
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    SHARED_REQUIRES(Locks::mutator_lock_) {
   ScopedQuickEntrypointChecks sqec(self);
   ArtField* field = FindFieldFast(field_idx, referrer, InstancePrimitiveRead, sizeof(int32_t));
   if (LIKELY(field != nullptr && obj != nullptr)) {
@@ -237,7 +239,7 @@ extern "C" uint32_t artGet32InstanceFromCode(uint32_t field_idx, mirror::Object*
 
 extern "C" uint64_t artGet64InstanceFromCode(uint32_t field_idx, mirror::Object* obj,
                                              ArtMethod* referrer, Thread* self)
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    SHARED_REQUIRES(Locks::mutator_lock_) {
   ScopedQuickEntrypointChecks sqec(self);
   ArtField* field = FindFieldFast(field_idx, referrer, InstancePrimitiveRead, sizeof(int64_t));
   if (LIKELY(field != nullptr && obj != nullptr)) {
@@ -258,7 +260,7 @@ extern "C" uint64_t artGet64InstanceFromCode(uint32_t field_idx, mirror::Object*
 extern "C" mirror::Object* artGetObjInstanceFromCode(uint32_t field_idx, mirror::Object* obj,
                                                      ArtMethod* referrer,
                                                      Thread* self)
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    SHARED_REQUIRES(Locks::mutator_lock_) {
   ScopedQuickEntrypointChecks sqec(self);
   ArtField* field = FindFieldFast(field_idx, referrer, InstanceObjectRead,
                                   sizeof(mirror::HeapReference<mirror::Object>));
@@ -279,7 +281,7 @@ extern "C" mirror::Object* artGetObjInstanceFromCode(uint32_t field_idx, mirror:
 
 extern "C" int artSet8StaticFromCode(uint32_t field_idx, uint32_t new_value,
                                      ArtMethod* referrer, Thread* self)
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    SHARED_REQUIRES(Locks::mutator_lock_) {
   ScopedQuickEntrypointChecks sqec(self);
   ArtField* field = FindFieldFast(field_idx, referrer, StaticPrimitiveWrite, sizeof(int8_t));
   if (LIKELY(field != nullptr)) {
@@ -310,7 +312,7 @@ extern "C" int artSet8StaticFromCode(uint32_t field_idx, uint32_t new_value,
 
 extern "C" int artSet16StaticFromCode(uint32_t field_idx, uint16_t new_value,
                                       ArtMethod* referrer, Thread* self)
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    SHARED_REQUIRES(Locks::mutator_lock_) {
   ScopedQuickEntrypointChecks sqec(self);
   ArtField* field = FindFieldFast(field_idx, referrer, StaticPrimitiveWrite, sizeof(int16_t));
   if (LIKELY(field != nullptr)) {
@@ -341,7 +343,7 @@ extern "C" int artSet16StaticFromCode(uint32_t field_idx, uint16_t new_value,
 
 extern "C" int artSet32StaticFromCode(uint32_t field_idx, uint32_t new_value,
                                       ArtMethod* referrer, Thread* self)
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    SHARED_REQUIRES(Locks::mutator_lock_) {
   ScopedQuickEntrypointChecks sqec(self);
   ArtField* field = FindFieldFast(field_idx, referrer, StaticPrimitiveWrite, sizeof(int32_t));
   if (LIKELY(field != nullptr)) {
@@ -360,7 +362,7 @@ extern "C" int artSet32StaticFromCode(uint32_t field_idx, uint32_t new_value,
 
 extern "C" int artSet64StaticFromCode(uint32_t field_idx, ArtMethod* referrer,
                                       uint64_t new_value, Thread* self)
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    SHARED_REQUIRES(Locks::mutator_lock_) {
   ScopedQuickEntrypointChecks sqec(self);
   ArtField* field = FindFieldFast(field_idx, referrer, StaticPrimitiveWrite, sizeof(int64_t));
   if (LIKELY(field != nullptr)) {
@@ -379,7 +381,7 @@ extern "C" int artSet64StaticFromCode(uint32_t field_idx, ArtMethod* referrer,
 
 extern "C" int artSetObjStaticFromCode(uint32_t field_idx, mirror::Object* new_value,
                                        ArtMethod* referrer, Thread* self)
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    SHARED_REQUIRES(Locks::mutator_lock_) {
   ScopedQuickEntrypointChecks sqec(self);
   ArtField* field = FindFieldFast(field_idx, referrer, StaticObjectWrite,
                                   sizeof(mirror::HeapReference<mirror::Object>));
@@ -402,7 +404,7 @@ extern "C" int artSetObjStaticFromCode(uint32_t field_idx, mirror::Object* new_v
 
 extern "C" int artSet8InstanceFromCode(uint32_t field_idx, mirror::Object* obj, uint8_t new_value,
                                        ArtMethod* referrer, Thread* self)
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    SHARED_REQUIRES(Locks::mutator_lock_) {
   ScopedQuickEntrypointChecks sqec(self);
   ArtField* field = FindFieldFast(field_idx, referrer, InstancePrimitiveWrite, sizeof(int8_t));
   if (LIKELY(field != nullptr && obj != nullptr)) {
@@ -441,7 +443,7 @@ extern "C" int artSet8InstanceFromCode(uint32_t field_idx, mirror::Object* obj, 
 
 extern "C" int artSet16InstanceFromCode(uint32_t field_idx, mirror::Object* obj, uint16_t new_value,
                                         ArtMethod* referrer, Thread* self)
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    SHARED_REQUIRES(Locks::mutator_lock_) {
   ScopedQuickEntrypointChecks sqec(self);
   ArtField* field = FindFieldFast(field_idx, referrer, InstancePrimitiveWrite, sizeof(int16_t));
   if (LIKELY(field != nullptr && obj != nullptr)) {
@@ -481,7 +483,7 @@ extern "C" int artSet16InstanceFromCode(uint32_t field_idx, mirror::Object* obj,
 
 extern "C" int artSet32InstanceFromCode(uint32_t field_idx, mirror::Object* obj, uint32_t new_value,
                                         ArtMethod* referrer, Thread* self)
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    SHARED_REQUIRES(Locks::mutator_lock_) {
   ScopedQuickEntrypointChecks sqec(self);
   ArtField* field = FindFieldFast(field_idx, referrer, InstancePrimitiveWrite, sizeof(int32_t));
   if (LIKELY(field != nullptr && obj != nullptr)) {
@@ -509,7 +511,7 @@ extern "C" int artSet32InstanceFromCode(uint32_t field_idx, mirror::Object* obj,
 
 extern "C" int artSet64InstanceFromCode(uint32_t field_idx, mirror::Object* obj, uint64_t new_value,
                                         ArtMethod* referrer, Thread* self)
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    SHARED_REQUIRES(Locks::mutator_lock_) {
   ScopedQuickEntrypointChecks sqec(self);
   ArtField* field = FindFieldFast(field_idx, referrer, InstancePrimitiveWrite, sizeof(int64_t));
   if (LIKELY(field != nullptr  && obj != nullptr)) {
@@ -534,7 +536,7 @@ extern "C" int artSet64InstanceFromCode(uint32_t field_idx, mirror::Object* obj,
 extern "C" int artSetObjInstanceFromCode(uint32_t field_idx, mirror::Object* obj,
                                          mirror::Object* new_value,
                                          ArtMethod* referrer, Thread* self)
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    SHARED_REQUIRES(Locks::mutator_lock_) {
   ScopedQuickEntrypointChecks sqec(self);
   ArtField* field = FindFieldFast(field_idx, referrer, InstanceObjectWrite,
                                   sizeof(mirror::HeapReference<mirror::Object>));
@@ -555,6 +557,30 @@ extern "C" int artSetObjInstanceFromCode(uint32_t field_idx, mirror::Object* obj
     }
   }
   return -1;  // failure
+}
+
+// TODO: Currently the read barrier does not have a fast path. Ideally the slow path should only
+// take one parameter "ref", which is given by the fast path.
+extern "C" mirror::Object* artReadBarrierSlow(mirror::Object* ref ATTRIBUTE_UNUSED,
+                                              mirror::Object* obj,
+                                              uint32_t offset) {
+  DCHECK(kEmitCompilerReadBarrier);
+  uint8_t* raw_addr = reinterpret_cast<uint8_t*>(obj) + offset;
+  mirror::HeapReference<mirror::Object>* ref_addr =
+     reinterpret_cast<mirror::HeapReference<mirror::Object>*>(raw_addr);
+  constexpr ReadBarrierOption kReadBarrierOption =
+      kUseReadBarrier ? kWithReadBarrier : kWithoutReadBarrier;
+  mirror::Object* result =
+      ReadBarrier::Barrier<mirror::Object, kReadBarrierOption, true>(obj,
+                                                                     MemberOffset(offset),
+                                                                     ref_addr);
+  return result;
+}
+
+extern "C" mirror::Object* artReadBarrierForRootSlow(GcRoot<mirror::Object>* root) {
+  DCHECK(kEmitCompilerReadBarrier);
+  // TODO: Pass a GcRootSource object as second argument to GcRoot::Read?
+  return root->Read();
 }
 
 }  // namespace art

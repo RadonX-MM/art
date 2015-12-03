@@ -14,7 +14,6 @@
  * limitations under the License.
  */
 
-#include "entrypoints/interpreter/interpreter_entrypoints.h"
 #include "entrypoints/jni/jni_entrypoints.h"
 #include "entrypoints/quick/quick_alloc_entrypoints.h"
 #include "entrypoints/quick/quick_default_externs.h"
@@ -29,16 +28,15 @@ namespace art {
 extern "C" uint32_t art_quick_assignable_from_code(const mirror::Class* klass,
                                                    const mirror::Class* ref_class);
 
-void InitEntryPoints(InterpreterEntryPoints* ipoints, JniEntryPoints* jpoints,
-                     QuickEntryPoints* qpoints) {
+// Read barrier entrypoints.
+extern "C" mirror::Object* art_quick_read_barrier_slow(mirror::Object*, mirror::Object*, uint32_t);
+extern "C" mirror::Object* art_quick_read_barrier_for_root_slow(GcRoot<mirror::Object>*);
+
+void InitEntryPoints(JniEntryPoints* jpoints, QuickEntryPoints* qpoints) {
 #if defined(__APPLE__)
-  UNUSED(ipoints, jpoints, qpoints);
+  UNUSED(jpoints, qpoints);
   UNIMPLEMENTED(FATAL);
 #else
-  // Interpreter
-  ipoints->pInterpreterToInterpreterBridge = artInterpreterToInterpreterBridge;
-  ipoints->pInterpreterToCompiledCodeBridge = artInterpreterToCompiledCodeBridge;
-
   // JNI
   jpoints->pDlsymLookup = art_jni_dlsym_lookup_stub;
 
@@ -141,10 +139,12 @@ void InitEntryPoints(InterpreterEntryPoints* ipoints, JniEntryPoints* jpoints,
   qpoints->pThrowStackOverflow = art_quick_throw_stack_overflow;
 
   // Deoptimize
-  qpoints->pDeoptimize = art_quick_deoptimize_from_compiled_slow_path;
+  qpoints->pDeoptimize = art_quick_deoptimize_from_compiled_code;
 
-  // Read barrier
+  // Read barrier.
   qpoints->pReadBarrierJni = ReadBarrierJni;
+  qpoints->pReadBarrierSlow = art_quick_read_barrier_slow;
+  qpoints->pReadBarrierForRootSlow = art_quick_read_barrier_for_root_slow;
 #endif  // __APPLE__
 };
 

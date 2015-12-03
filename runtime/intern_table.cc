@@ -19,8 +19,10 @@
 #include <memory>
 
 #include "gc_root-inl.h"
+#include "gc/collector/garbage_collector.h"
 #include "gc/space/image_space.h"
-#include "mirror/dex_cache.h"
+#include "gc/weak_root_state.h"
+#include "mirror/dex_cache-inl.h"
 #include "mirror/object_array-inl.h"
 #include "mirror/object-inl.h"
 #include "mirror/string-inl.h"
@@ -31,8 +33,8 @@ namespace art {
 
 InternTable::InternTable()
     : image_added_to_intern_table_(false), log_new_roots_(false),
-      allow_new_interns_(true),
-      new_intern_condition_("New intern condition", *Locks::intern_table_lock_) {
+      weak_intern_condition_("New intern condition", *Locks::intern_table_lock_),
+      weak_root_state_(gc::kWeakRootStateNormal) {
 }
 
 size_t InternTable::Size() const {
@@ -163,8 +165,7 @@ void InternTable::AddImageStringsToTable(gc::space::ImageSpace* image_space) {
       mirror::ObjectArray<mirror::DexCache>* dex_caches = root->AsObjectArray<mirror::DexCache>();
       for (int32_t i = 0; i < dex_caches->GetLength(); ++i) {
         mirror::DexCache* dex_cache = dex_caches->Get(i);
-        const DexFile* dex_file = dex_cache->GetDexFile();
-        const size_t num_strings = dex_file->NumStringIds();
+        const size_t num_strings = dex_cache->NumStrings();
         for (size_t j = 0; j < num_strings; ++j) {
           mirror::String* image_string = dex_cache->GetResolvedString(j);
           if (image_string != nullptr) {
@@ -182,12 +183,11 @@ void InternTable::AddImageStringsToTable(gc::space::ImageSpace* image_space) {
   }
 }
 
-mirror::String* InternTable::LookupStringFromImage(mirror::String* s)
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+mirror::String* InternTable::LookupStringFromImage(mirror::String* s) {
   if (image_added_to_intern_table_) {
     return nullptr;
   }
-  gc::space::ImageSpace* image = Runtime::Current()->GetHeap()->GetImageSpace();
+  gc::space::ImageSpace* image = Runtime::Current()->GetHeap()->GetBootImageSpace();
   if (image == nullptr) {
     return nullptr;  // No image present.
   }
@@ -211,39 +211,64 @@ mirror::String* InternTable::LookupStringFromImage(mirror::String* s)
   return nullptr;
 }
 
-void InternTable::AllowNewInterns() {
+void InternTable::BroadcastForNewInterns() {
+  CHECK(kUseReadBarrier);
   Thread* self = Thread::Current();
   MutexLock mu(self, *Locks::intern_table_lock_);
-  allow_new_interns_ = true;
-  new_intern_condition_.Broadcast(self);
+  weak_intern_condition_.Broadcast(self);
 }
 
-void InternTable::DisallowNewInterns() {
-  Thread* self = Thread::Current();
-  MutexLock mu(self, *Locks::intern_table_lock_);
-  allow_new_interns_ = false;
+void InternTable::WaitUntilAccessible(Thread* self) {
+  Locks::intern_table_lock_->ExclusiveUnlock(self);
+  {
+    ScopedThreadSuspension sts(self, kWaitingWeakGcRootRead);
+    MutexLock mu(self, *Locks::intern_table_lock_);
+    while (weak_root_state_ == gc::kWeakRootStateNoReadsOrWrites) {
+      weak_intern_condition_.Wait(self);
+    }
+  }
+  Locks::intern_table_lock_->ExclusiveLock(self);
 }
 
-void InternTable::EnsureNewInternsDisallowed() {
-  // Lock and unlock once to ensure that no threads are still in the
-  // middle of adding new interns.
-  MutexLock mu(Thread::Current(), *Locks::intern_table_lock_);
-  CHECK(!allow_new_interns_);
-}
-
-mirror::String* InternTable::Insert(mirror::String* s, bool is_strong) {
+mirror::String* InternTable::Insert(mirror::String* s, bool is_strong, bool holding_locks) {
   if (s == nullptr) {
     return nullptr;
   }
-  Thread* self = Thread::Current();
+  Thread* const self = Thread::Current();
   MutexLock mu(self, *Locks::intern_table_lock_);
-  while (UNLIKELY(!allow_new_interns_)) {
-    new_intern_condition_.WaitHoldingLocks(self);
+  if (kDebugLocking && !holding_locks) {
+    Locks::mutator_lock_->AssertSharedHeld(self);
+    CHECK_EQ(2u, self->NumberOfHeldMutexes()) << "may only safely hold the mutator lock";
   }
-  // Check the strong table for a match.
-  mirror::String* strong = LookupStrong(s);
-  if (strong != nullptr) {
-    return strong;
+  while (true) {
+    if (holding_locks) {
+      if (!kUseReadBarrier) {
+        CHECK_EQ(weak_root_state_, gc::kWeakRootStateNormal);
+      } else {
+        CHECK(self->GetWeakRefAccessEnabled());
+      }
+    }
+    // Check the strong table for a match.
+    mirror::String* strong = LookupStrong(s);
+    if (strong != nullptr) {
+      return strong;
+    }
+    if ((!kUseReadBarrier && weak_root_state_ != gc::kWeakRootStateNoReadsOrWrites) ||
+        (kUseReadBarrier && self->GetWeakRefAccessEnabled())) {
+      break;
+    }
+    // weak_root_state_ is set to gc::kWeakRootStateNoReadsOrWrites in the GC pause but is only
+    // cleared after SweepSystemWeaks has completed. This is why we need to wait until it is
+    // cleared.
+    CHECK(!holding_locks);
+    StackHandleScope<1> hs(self);
+    auto h = hs.NewHandleWrapper(&s);
+    WaitUntilAccessible(self);
+  }
+  if (!kUseReadBarrier) {
+    CHECK_EQ(weak_root_state_, gc::kWeakRootStateNormal);
+  } else {
+    CHECK(self->GetWeakRefAccessEnabled());
   }
   // There is no match in the strong table, check the weak table.
   mirror::String* weak = LookupWeak(s);
@@ -275,12 +300,17 @@ mirror::String* InternTable::InternStrong(const char* utf8_data) {
   return InternStrong(mirror::String::AllocFromModifiedUtf8(Thread::Current(), utf8_data));
 }
 
+mirror::String* InternTable::InternStrongImageString(mirror::String* s) {
+  // May be holding the heap bitmap lock.
+  return Insert(s, true, true);
+}
+
 mirror::String* InternTable::InternStrong(mirror::String* s) {
-  return Insert(s, true);
+  return Insert(s, true, false);
 }
 
 mirror::String* InternTable::InternWeak(mirror::String* s) {
-  return Insert(s, false);
+  return Insert(s, false, false);
 }
 
 bool InternTable::ContainsWeak(mirror::String* s) {
@@ -288,9 +318,9 @@ bool InternTable::ContainsWeak(mirror::String* s) {
   return LookupWeak(s) == s;
 }
 
-void InternTable::SweepInternTableWeaks(IsMarkedCallback* callback, void* arg) {
+void InternTable::SweepInternTableWeaks(IsMarkedVisitor* visitor) {
   MutexLock mu(Thread::Current(), *Locks::intern_table_lock_);
-  weak_interns_.SweepWeaks(callback, arg);
+  weak_interns_.SweepWeaks(visitor);
 }
 
 void InternTable::AddImageInternTable(gc::space::ImageSpace* image_space) {
@@ -393,16 +423,16 @@ void InternTable::Table::VisitRoots(RootVisitor* visitor) {
   }
 }
 
-void InternTable::Table::SweepWeaks(IsMarkedCallback* callback, void* arg) {
-  SweepWeaks(&pre_zygote_table_, callback, arg);
-  SweepWeaks(&post_zygote_table_, callback, arg);
+void InternTable::Table::SweepWeaks(IsMarkedVisitor* visitor) {
+  SweepWeaks(&pre_zygote_table_, visitor);
+  SweepWeaks(&post_zygote_table_, visitor);
 }
 
-void InternTable::Table::SweepWeaks(UnorderedSet* set, IsMarkedCallback* callback, void* arg) {
+void InternTable::Table::SweepWeaks(UnorderedSet* set, IsMarkedVisitor* visitor) {
   for (auto it = set->begin(), end = set->end(); it != end;) {
     // This does not need a read barrier because this is called by GC.
     mirror::Object* object = it->Read<kWithoutReadBarrier>();
-    mirror::Object* new_object = callback(object, arg);
+    mirror::Object* new_object = visitor->IsMarked(object);
     if (new_object == nullptr) {
       it = set->Erase(it);
     } else {
@@ -414,6 +444,27 @@ void InternTable::Table::SweepWeaks(UnorderedSet* set, IsMarkedCallback* callbac
 
 size_t InternTable::Table::Size() const {
   return pre_zygote_table_.Size() + post_zygote_table_.Size();
+}
+
+void InternTable::ChangeWeakRootState(gc::WeakRootState new_state) {
+  MutexLock mu(Thread::Current(), *Locks::intern_table_lock_);
+  ChangeWeakRootStateLocked(new_state);
+}
+
+void InternTable::ChangeWeakRootStateLocked(gc::WeakRootState new_state) {
+  CHECK(!kUseReadBarrier);
+  weak_root_state_ = new_state;
+  if (new_state != gc::kWeakRootStateNoReadsOrWrites) {
+    weak_intern_condition_.Broadcast(Thread::Current());
+  }
+}
+
+InternTable::Table::Table() {
+  Runtime* const runtime = Runtime::Current();
+  pre_zygote_table_.SetLoadFactor(runtime->GetHashTableMinLoadFactor(),
+                                  runtime->GetHashTableMaxLoadFactor());
+  post_zygote_table_.SetLoadFactor(runtime->GetHashTableMinLoadFactor(),
+                                   runtime->GetHashTableMaxLoadFactor());
 }
 
 }  // namespace art

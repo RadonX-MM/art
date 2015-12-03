@@ -29,10 +29,10 @@ static int gJava_StackWalk_refmap_calls = 0;
 
 class TestReferenceMapVisitor : public CheckReferenceMapVisitor {
  public:
-  explicit TestReferenceMapVisitor(Thread* thread) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_)
+  explicit TestReferenceMapVisitor(Thread* thread) SHARED_REQUIRES(Locks::mutator_lock_)
       : CheckReferenceMapVisitor(thread) {}
 
-  bool VisitFrame() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+  bool VisitFrame() SHARED_REQUIRES(Locks::mutator_lock_) {
     if (CheckReferenceMapVisitor::VisitFrame()) {
       return true;
     }
@@ -45,11 +45,11 @@ class TestReferenceMapVisitor : public CheckReferenceMapVisitor {
     if (m_name == "f") {
       if (gJava_StackWalk_refmap_calls == 1) {
         CHECK_EQ(1U, GetDexPc());
-        CHECK_REGS(1);
+        CHECK_REGS(4);
       } else {
         CHECK_EQ(gJava_StackWalk_refmap_calls, 2);
         CHECK_EQ(5U, GetDexPc());
-        CHECK_REGS(1);
+        CHECK_REGS(4);
       }
     } else if (m_name == "g") {
       if (gJava_StackWalk_refmap_calls == 1) {

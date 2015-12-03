@@ -21,11 +21,16 @@
 #include "base/mutex.h"
 #include "class_linker-inl.h"
 #include "dex_file-inl.h"
+#include "entrypoints/entrypoint_utils-inl.h"
+#include "entrypoints/quick/callee_save_frame.h"
+#include "entrypoints/runtime_asm_entrypoints.h"
 #include "gc/accounting/card_table-inl.h"
 #include "mirror/class-inl.h"
 #include "mirror/method.h"
 #include "mirror/object-inl.h"
 #include "mirror/object_array-inl.h"
+#include "nth_caller_visitor.h"
+#include "oat_quick_method_header.h"
 #include "reflection.h"
 #include "scoped_thread_state_change.h"
 #include "ScopedLocalRef.h"
@@ -38,14 +43,16 @@ static inline mirror::Class* CheckFilledNewArrayAlloc(uint32_t type_idx,
                                                       ArtMethod* referrer,
                                                       Thread* self,
                                                       bool access_check)
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    SHARED_REQUIRES(Locks::mutator_lock_) {
   if (UNLIKELY(component_count < 0)) {
     ThrowNegativeArraySizeException(component_count);
     return nullptr;  // Failure
   }
-  mirror::Class* klass = referrer->GetDexCacheResolvedType<false>(type_idx);
+  ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
+  size_t pointer_size = class_linker->GetImagePointerSize();
+  mirror::Class* klass = referrer->GetDexCacheResolvedType<false>(type_idx, pointer_size);
   if (UNLIKELY(klass == nullptr)) {  // Not in dex cache so try to resolve
-    klass = Runtime::Current()->GetClassLinker()->ResolveType(type_idx, referrer);
+    klass = class_linker->ResolveType(type_idx, referrer);
     if (klass == nullptr) {  // Error
       DCHECK(self->IsExceptionPending());
       return nullptr;  // Failure
@@ -214,7 +221,8 @@ void CheckReferenceResult(mirror::Object* o, Thread* self) {
     return;
   }
   // Make sure that the result is an instance of the type this method was expected to return.
-  mirror::Class* return_type = self->GetCurrentMethod(nullptr)->GetReturnType();
+  mirror::Class* return_type = self->GetCurrentMethod(nullptr)->GetReturnType(true /* resolve */,
+                                                                              sizeof(void*));
 
   if (!o->InstanceOf(return_type)) {
     Runtime::Current()->GetJavaVM()->JniAbortF(nullptr,
@@ -277,7 +285,9 @@ JValue InvokeProxyInvocationHandler(ScopedObjectAccessAlreadyRunnable& soa, cons
       StackHandleScope<1> hs(soa.Self());
       auto h_interface_method(hs.NewHandle(soa.Decode<mirror::Method*>(interface_method_jobj)));
       // This can cause thread suspension.
-      mirror::Class* result_type = h_interface_method->GetArtMethod()->GetReturnType();
+      size_t pointer_size = Runtime::Current()->GetClassLinker()->GetImagePointerSize();
+      mirror::Class* result_type =
+          h_interface_method->GetArtMethod()->GetReturnType(true /* resolve */, pointer_size);
       mirror::Object* result_ref = soa.Decode<mirror::Object*>(result);
       JValue result_unboxed;
       if (!UnboxPrimitiveForResult(result_ref, result_type, &result_unboxed)) {
@@ -298,7 +308,7 @@ JValue InvokeProxyInvocationHandler(ScopedObjectAccessAlreadyRunnable& soa, cons
           interface_method->GetArtMethod(), sizeof(void*));
       auto* virtual_methods = proxy_class->GetVirtualMethodsPtr();
       size_t num_virtuals = proxy_class->NumVirtualMethods();
-      size_t method_size = ArtMethod::ObjectSize(sizeof(void*));
+      size_t method_size = ArtMethod::Size(sizeof(void*));
       int throws_index = (reinterpret_cast<uintptr_t>(proxy_method) -
           reinterpret_cast<uintptr_t>(virtual_methods)) / method_size;
       CHECK_LT(throws_index, static_cast<int>(num_virtuals));
@@ -338,6 +348,53 @@ bool FillArrayData(mirror::Object* obj, const Instruction::ArrayDataPayload* pay
   uint32_t size_in_bytes = payload->element_count * payload->element_width;
   memcpy(array->GetRawData(payload->element_width, 0), payload->data, size_in_bytes);
   return true;
+}
+
+ArtMethod* GetCalleeSaveMethodCaller(ArtMethod** sp,
+                                     Runtime::CalleeSaveType type,
+                                     bool do_caller_check)
+    SHARED_REQUIRES(Locks::mutator_lock_) {
+  DCHECK_EQ(*sp, Runtime::Current()->GetCalleeSaveMethod(type));
+
+  const size_t callee_frame_size = GetCalleeSaveFrameSize(kRuntimeISA, type);
+  auto** caller_sp = reinterpret_cast<ArtMethod**>(
+      reinterpret_cast<uintptr_t>(sp) + callee_frame_size);
+  const size_t callee_return_pc_offset = GetCalleeSaveReturnPcOffset(kRuntimeISA, type);
+  uintptr_t caller_pc = *reinterpret_cast<uintptr_t*>(
+      (reinterpret_cast<uint8_t*>(sp) + callee_return_pc_offset));
+  ArtMethod* outer_method = *caller_sp;
+  ArtMethod* caller = outer_method;
+  if (LIKELY(caller_pc != reinterpret_cast<uintptr_t>(GetQuickInstrumentationExitPc()))) {
+    if (outer_method != nullptr) {
+      const OatQuickMethodHeader* current_code = outer_method->GetOatQuickMethodHeader(caller_pc);
+      if (current_code->IsOptimized()) {
+          uintptr_t native_pc_offset = current_code->NativeQuickPcOffset(caller_pc);
+          CodeInfo code_info = current_code->GetOptimizedCodeInfo();
+          StackMapEncoding encoding = code_info.ExtractEncoding();
+          StackMap stack_map = code_info.GetStackMapForNativePcOffset(native_pc_offset, encoding);
+          DCHECK(stack_map.IsValid());
+          if (stack_map.HasInlineInfo(encoding)) {
+            InlineInfo inline_info = code_info.GetInlineInfoOf(stack_map, encoding);
+            caller = GetResolvedMethod(outer_method, inline_info, inline_info.GetDepth() - 1);
+          }
+      }
+    }
+    if (kIsDebugBuild && do_caller_check) {
+      // Note that do_caller_check is optional, as this method can be called by
+      // stubs, and tests without a proper call stack.
+      NthCallerVisitor visitor(Thread::Current(), 1, true);
+      visitor.WalkStack();
+      CHECK_EQ(caller, visitor.caller);
+    }
+  } else {
+    // We're instrumenting, just use the StackVisitor which knows how to
+    // handle instrumented frames.
+    NthCallerVisitor visitor(Thread::Current(), 1, true);
+    visitor.WalkStack();
+    caller = visitor.caller;
+  }
+
+  return caller;
 }
 
 }  // namespace art

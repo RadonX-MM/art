@@ -14,13 +14,15 @@
  * limitations under the License.
  */
 
-#include "interpreter_common.h"
+#include "interpreter.h"
 
 #include <limits>
 
+#include "interpreter_common.h"
 #include "mirror/string-inl.h"
 #include "scoped_thread_state_change.h"
 #include "ScopedLocalRef.h"
+#include "stack.h"
 #include "unstarted_runtime.h"
 
 namespace art {
@@ -28,7 +30,7 @@ namespace interpreter {
 
 static void InterpreterJni(Thread* self, ArtMethod* method, const StringPiece& shorty,
                            Object* receiver, uint32_t* args, JValue* result)
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    SHARED_REQUIRES(Locks::mutator_lock_) {
   // TODO: The following enters JNI code using a typedef-ed function rather than the JNI compiler,
   //       it should be removed and JNI compiled stubs used instead.
   ScopedObjectAccessUnchecked soa(self);
@@ -240,27 +242,27 @@ JValue ExecuteGotoImpl(Thread*, const DexFile::CodeItem*, ShadowFrame&, JValue) 
   UNREACHABLE();
 }
 // Explicit definitions of ExecuteGotoImpl.
-template<> SHARED_LOCKS_REQUIRED(Locks::mutator_lock_)
+template<> SHARED_REQUIRES(Locks::mutator_lock_)
 JValue ExecuteGotoImpl<true, false>(Thread* self, const DexFile::CodeItem* code_item,
                                     ShadowFrame& shadow_frame, JValue result_register);
-template<> SHARED_LOCKS_REQUIRED(Locks::mutator_lock_)
+template<> SHARED_REQUIRES(Locks::mutator_lock_)
 JValue ExecuteGotoImpl<false, false>(Thread* self, const DexFile::CodeItem* code_item,
                                      ShadowFrame& shadow_frame, JValue result_register);
-template<> SHARED_LOCKS_REQUIRED(Locks::mutator_lock_)
+template<> SHARED_REQUIRES(Locks::mutator_lock_)
 JValue ExecuteGotoImpl<true, true>(Thread* self,  const DexFile::CodeItem* code_item,
                                    ShadowFrame& shadow_frame, JValue result_register);
-template<> SHARED_LOCKS_REQUIRED(Locks::mutator_lock_)
+template<> SHARED_REQUIRES(Locks::mutator_lock_)
 JValue ExecuteGotoImpl<false, true>(Thread* self, const DexFile::CodeItem* code_item,
                                     ShadowFrame& shadow_frame, JValue result_register);
 #endif
 
 static JValue Execute(Thread* self, const DexFile::CodeItem* code_item, ShadowFrame& shadow_frame,
                       JValue result_register)
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+    SHARED_REQUIRES(Locks::mutator_lock_);
 
 static inline JValue Execute(Thread* self, const DexFile::CodeItem* code_item,
                              ShadowFrame& shadow_frame, JValue result_register) {
-  DCHECK(!shadow_frame.GetMethod()->IsAbstract());
+  DCHECK(shadow_frame.GetMethod()->IsInvokable());
   DCHECK(!shadow_frame.GetMethod()->IsNative());
   shadow_frame.GetMethod()->GetDeclaringClass()->AssertInitializedOrInitializingInThread(self);
 
@@ -316,9 +318,9 @@ void EnterInterpreterFromInvoke(Thread* self, ArtMethod* method, Object* receive
   if (code_item != nullptr) {
     num_regs =  code_item->registers_size_;
     num_ins = code_item->ins_size_;
-  } else if (method->IsAbstract()) {
+  } else if (!method->IsInvokable()) {
     self->EndAssertNoThreadSuspension(old_cause);
-    ThrowAbstractMethodError(method);
+    method->ThrowInvocationTimeError();
     return;
   } else {
     DCHECK(method->IsNative());
@@ -330,8 +332,9 @@ void EnterInterpreterFromInvoke(Thread* self, ArtMethod* method, Object* receive
   }
   // Set up shadow frame with matching number of reference slots to vregs.
   ShadowFrame* last_shadow_frame = self->GetManagedStack()->GetTopShadowFrame();
-  void* memory = alloca(ShadowFrame::ComputeSize(num_regs));
-  ShadowFrame* shadow_frame(ShadowFrame::Create(num_regs, last_shadow_frame, method, 0, memory));
+  ShadowFrameAllocaUniquePtr shadow_frame_unique_ptr =
+      CREATE_SHADOW_FRAME(num_regs, last_shadow_frame, method, /* dex pc */ 0);
+  ShadowFrame* shadow_frame = shadow_frame_unique_ptr.get();
   self->PushShadowFrame(shadow_frame);
 
   size_t cur_reg = num_regs - num_ins;
@@ -395,18 +398,23 @@ void EnterInterpreterFromInvoke(Thread* self, ArtMethod* method, Object* receive
 }
 
 void EnterInterpreterFromDeoptimize(Thread* self, ShadowFrame* shadow_frame, JValue* ret_val)
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    SHARED_REQUIRES(Locks::mutator_lock_) {
   JValue value;
   // Set value to last known result in case the shadow frame chain is empty.
   value.SetJ(ret_val->GetJ());
+  // Are we executing the first shadow frame?
+  bool first = true;
   while (shadow_frame != nullptr) {
     self->SetTopOfShadowStack(shadow_frame);
     const DexFile::CodeItem* code_item = shadow_frame->GetMethod()->GetCodeItem();
     const uint32_t dex_pc = shadow_frame->GetDexPC();
     uint32_t new_dex_pc;
     if (UNLIKELY(self->IsExceptionPending())) {
+      // If we deoptimize from the QuickExceptionHandler, we already reported the exception to
+      // the instrumentation. To prevent from reporting it a second time, we simply pass a
+      // null Instrumentation*.
       const instrumentation::Instrumentation* const instrumentation =
-          Runtime::Current()->GetInstrumentation();
+          first ? nullptr : Runtime::Current()->GetInstrumentation();
       uint32_t found_dex_pc = FindNextInstructionFollowingException(self, *shadow_frame, dex_pc,
                                                                     instrumentation);
       new_dex_pc = found_dex_pc;  // the dex pc of a matching catch handler
@@ -424,6 +432,7 @@ void EnterInterpreterFromDeoptimize(Thread* self, ShadowFrame* shadow_frame, JVa
     ShadowFrame* old_frame = shadow_frame;
     shadow_frame = shadow_frame->GetLink();
     ShadowFrame::DeleteDeoptimizedFrame(old_frame);
+    first = false;
   }
   ret_val->SetJ(value.GetJ());
 }
@@ -440,8 +449,8 @@ JValue EnterInterpreterFromEntryPoint(Thread* self, const DexFile::CodeItem* cod
   return Execute(self, code_item, *shadow_frame, JValue());
 }
 
-extern "C" void artInterpreterToInterpreterBridge(Thread* self, const DexFile::CodeItem* code_item,
-                                                  ShadowFrame* shadow_frame, JValue* result) {
+void ArtInterpreterToInterpreterBridge(Thread* self, const DexFile::CodeItem* code_item,
+                                       ShadowFrame* shadow_frame, JValue* result) {
   bool implicit_check = !Runtime::Current()->ExplicitStackOverflowChecks();
   if (UNLIKELY(__builtin_frame_address(0) < self->GetStackEndForInterpreter(implicit_check))) {
     ThrowStackOverflowError(self);
@@ -449,10 +458,11 @@ extern "C" void artInterpreterToInterpreterBridge(Thread* self, const DexFile::C
   }
 
   self->PushShadowFrame(shadow_frame);
+  ArtMethod* method = shadow_frame->GetMethod();
   // Ensure static methods are initialized.
-  const bool is_static = shadow_frame->GetMethod()->IsStatic();
+  const bool is_static = method->IsStatic();
   if (is_static) {
-    mirror::Class* declaring_class = shadow_frame->GetMethod()->GetDeclaringClass();
+    mirror::Class* declaring_class = method->GetDeclaringClass();
     if (UNLIKELY(!declaring_class->IsInitialized())) {
       StackHandleScope<1> hs(self);
       HandleWrapper<Class> h_declaring_class(hs.NewHandleWrapper(&declaring_class));

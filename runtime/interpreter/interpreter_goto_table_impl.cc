@@ -17,8 +17,13 @@
 #if !defined(__clang__)
 // Clang 3.4 fails to build the goto interpreter implementation.
 
+
+#include "base/stl_util.h"  // MakeUnique
+#include "experimental_flags.h"
 #include "interpreter_common.h"
 #include "safe_math.h"
+
+#include <memory>  // std::unique_ptr
 
 namespace art {
 namespace interpreter {
@@ -74,6 +79,22 @@ namespace interpreter {
 
 #define HANDLE_INSTRUCTION_START(opcode) op_##opcode:  // NOLINT(whitespace/labels)
 #define HANDLE_INSTRUCTION_END() UNREACHABLE_CODE_CHECK()
+
+// Use with instructions labeled with kExperimental flag:
+#define HANDLE_EXPERIMENTAL_INSTRUCTION_START(opcode)                                             \
+  HANDLE_INSTRUCTION_START(opcode);                                                               \
+  DCHECK(inst->IsExperimental());                                                                 \
+  if (Runtime::Current()->AreExperimentalFlagsEnabled(ExperimentalFlags::kLambdas)) {
+#define HANDLE_EXPERIMENTAL_INSTRUCTION_END()                                                     \
+  } else {                                                                                        \
+      UnexpectedOpcode(inst, shadow_frame);                                                       \
+  } HANDLE_INSTRUCTION_END();
+
+#define HANDLE_MONITOR_CHECKS()                                                                   \
+  if (!shadow_frame.GetLockCountData().                                                           \
+          CheckAllMonitorsReleasedOrThrow<do_assignability_check>(self)) {                        \
+    HANDLE_PENDING_EXCEPTION();                                                                   \
+  }
 
 /**
  * Interpreter based on computed goto tables.
@@ -168,6 +189,9 @@ JValue ExecuteGotoImpl(Thread* self, const DexFile::CodeItem* code_item, ShadowF
     }
   }
 
+  std::unique_ptr<lambda::ClosureBuilder> lambda_closure_builder;
+  size_t lambda_captured_variable_index = 0;
+
   // Jump to first instruction.
   ADVANCE(0);
   UNREACHABLE_CODE_CHECK();
@@ -257,6 +281,7 @@ JValue ExecuteGotoImpl(Thread* self, const DexFile::CodeItem* code_item, ShadowF
   HANDLE_INSTRUCTION_START(RETURN_VOID_NO_BARRIER) {
     JValue result;
     self->AllowThreadSuspension();
+    HANDLE_MONITOR_CHECKS();
     instrumentation::Instrumentation* instrumentation = Runtime::Current()->GetInstrumentation();
     if (UNLIKELY(instrumentation->HasMethodExitListeners())) {
       instrumentation->MethodExitEvent(self, shadow_frame.GetThisObject(code_item->ins_size_),
@@ -271,6 +296,7 @@ JValue ExecuteGotoImpl(Thread* self, const DexFile::CodeItem* code_item, ShadowF
     QuasiAtomic::ThreadFenceForConstructor();
     JValue result;
     self->AllowThreadSuspension();
+    HANDLE_MONITOR_CHECKS();
     instrumentation::Instrumentation* instrumentation = Runtime::Current()->GetInstrumentation();
     if (UNLIKELY(instrumentation->HasMethodExitListeners())) {
       instrumentation->MethodExitEvent(self, shadow_frame.GetThisObject(code_item->ins_size_),
@@ -286,6 +312,7 @@ JValue ExecuteGotoImpl(Thread* self, const DexFile::CodeItem* code_item, ShadowF
     result.SetJ(0);
     result.SetI(shadow_frame.GetVReg(inst->VRegA_11x(inst_data)));
     self->AllowThreadSuspension();
+    HANDLE_MONITOR_CHECKS();
     instrumentation::Instrumentation* instrumentation = Runtime::Current()->GetInstrumentation();
     if (UNLIKELY(instrumentation->HasMethodExitListeners())) {
       instrumentation->MethodExitEvent(self, shadow_frame.GetThisObject(code_item->ins_size_),
@@ -300,6 +327,7 @@ JValue ExecuteGotoImpl(Thread* self, const DexFile::CodeItem* code_item, ShadowF
     JValue result;
     result.SetJ(shadow_frame.GetVRegLong(inst->VRegA_11x(inst_data)));
     self->AllowThreadSuspension();
+    HANDLE_MONITOR_CHECKS();
     instrumentation::Instrumentation* instrumentation = Runtime::Current()->GetInstrumentation();
     if (UNLIKELY(instrumentation->HasMethodExitListeners())) {
       instrumentation->MethodExitEvent(self, shadow_frame.GetThisObject(code_item->ins_size_),
@@ -313,10 +341,13 @@ JValue ExecuteGotoImpl(Thread* self, const DexFile::CodeItem* code_item, ShadowF
   HANDLE_INSTRUCTION_START(RETURN_OBJECT) {
     JValue result;
     self->AllowThreadSuspension();
+    HANDLE_MONITOR_CHECKS();
     const uint8_t vreg_index = inst->VRegA_11x(inst_data);
     Object* obj_result = shadow_frame.GetVRegReference(vreg_index);
     if (do_assignability_check && obj_result != nullptr) {
-      Class* return_type = shadow_frame.GetMethod()->GetReturnType();
+      size_t pointer_size = Runtime::Current()->GetClassLinker()->GetImagePointerSize();
+      Class* return_type = shadow_frame.GetMethod()->GetReturnType(true /* resolve */,
+                                                                   pointer_size);
       obj_result = shadow_frame.GetVRegReference(vreg_index);
       if (return_type == nullptr) {
         // Return the pending exception.
@@ -448,7 +479,7 @@ JValue ExecuteGotoImpl(Thread* self, const DexFile::CodeItem* code_item, ShadowF
       ThrowNullPointerExceptionFromInterpreter();
       HANDLE_PENDING_EXCEPTION();
     } else {
-      DoMonitorEnter(self, obj);
+      DoMonitorEnter<do_access_check>(self, &shadow_frame, obj);
       POSSIBLY_HANDLE_PENDING_EXCEPTION(self->IsExceptionPending(), 1);
     }
   }
@@ -460,7 +491,7 @@ JValue ExecuteGotoImpl(Thread* self, const DexFile::CodeItem* code_item, ShadowF
       ThrowNullPointerExceptionFromInterpreter();
       HANDLE_PENDING_EXCEPTION();
     } else {
-      DoMonitorExit(self, obj);
+      DoMonitorExit<do_access_check>(self, &shadow_frame, obj);
       POSSIBLY_HANDLE_PENDING_EXCEPTION(self->IsExceptionPending(), 1);
     }
   }
@@ -1609,6 +1640,14 @@ JValue ExecuteGotoImpl(Thread* self, const DexFile::CodeItem* code_item, ShadowF
   }
   HANDLE_INSTRUCTION_END();
 
+  HANDLE_EXPERIMENTAL_INSTRUCTION_START(INVOKE_LAMBDA) {
+    bool success = DoInvokeLambda<do_access_check>(self, shadow_frame, inst, inst_data,
+                                                   &result_register);
+    UPDATE_HANDLER_TABLE();
+    POSSIBLY_HANDLE_PENDING_EXCEPTION(!success, 2);
+  }
+  HANDLE_EXPERIMENTAL_INSTRUCTION_END();
+
   HANDLE_INSTRUCTION_START(NEG_INT)
     shadow_frame.SetVReg(
         inst->VRegA_12x(inst_data), -shadow_frame.GetVReg(inst->VRegB_12x(inst_data)));
@@ -2390,6 +2429,62 @@ JValue ExecuteGotoImpl(Thread* self, const DexFile::CodeItem* code_item, ShadowF
     ADVANCE(2);
   HANDLE_INSTRUCTION_END();
 
+  HANDLE_EXPERIMENTAL_INSTRUCTION_START(CREATE_LAMBDA) {
+    if (lambda_closure_builder == nullptr) {
+      // DoCreateLambda always needs a ClosureBuilder, even if it has 0 captured variables.
+      lambda_closure_builder = MakeUnique<lambda::ClosureBuilder>();
+    }
+
+    // TODO: these allocations should not leak, and the lambda method should not be local.
+    lambda::Closure* lambda_closure =
+        reinterpret_cast<lambda::Closure*>(alloca(lambda_closure_builder->GetSize()));
+    bool success = DoCreateLambda<do_access_check>(self,
+                                                   inst,
+                                                   /*inout*/shadow_frame,
+                                                   /*inout*/lambda_closure_builder.get(),
+                                                   /*inout*/lambda_closure);
+    lambda_closure_builder.reset(nullptr);  // reset state of variables captured
+    POSSIBLY_HANDLE_PENDING_EXCEPTION(!success, 2);
+  }
+  HANDLE_EXPERIMENTAL_INSTRUCTION_END();
+
+  HANDLE_EXPERIMENTAL_INSTRUCTION_START(BOX_LAMBDA) {
+    bool success = DoBoxLambda<do_access_check>(self, shadow_frame, inst, inst_data);
+    POSSIBLY_HANDLE_PENDING_EXCEPTION(!success, 2);
+  }
+  HANDLE_EXPERIMENTAL_INSTRUCTION_END();
+
+  HANDLE_EXPERIMENTAL_INSTRUCTION_START(UNBOX_LAMBDA) {
+    bool success = DoUnboxLambda<do_access_check>(self, shadow_frame, inst, inst_data);
+    POSSIBLY_HANDLE_PENDING_EXCEPTION(!success, 2);
+  }
+  HANDLE_EXPERIMENTAL_INSTRUCTION_END();
+
+  HANDLE_EXPERIMENTAL_INSTRUCTION_START(CAPTURE_VARIABLE) {
+    if (lambda_closure_builder == nullptr) {
+      lambda_closure_builder = MakeUnique<lambda::ClosureBuilder>();
+    }
+
+    bool success = DoCaptureVariable<do_access_check>(self,
+                                                      inst,
+                                                      /*inout*/shadow_frame,
+                                                      /*inout*/lambda_closure_builder.get());
+
+    POSSIBLY_HANDLE_PENDING_EXCEPTION(!success, 2);
+  }
+  HANDLE_EXPERIMENTAL_INSTRUCTION_END();
+
+  HANDLE_EXPERIMENTAL_INSTRUCTION_START(LIBERATE_VARIABLE) {
+    bool success = DoLiberateVariable<do_access_check>(self,
+                                                           inst,
+                                                           lambda_captured_variable_index,
+                                                           /*inout*/shadow_frame);
+    // Temporarily only allow sequences of 'liberate-variable, liberate-variable, ...'
+    lambda_captured_variable_index++;
+    POSSIBLY_HANDLE_PENDING_EXCEPTION(!success, 2);
+  }
+  HANDLE_EXPERIMENTAL_INSTRUCTION_END();
+
   HANDLE_INSTRUCTION_START(UNUSED_3E)
     UnexpectedOpcode(inst, shadow_frame);
   HANDLE_INSTRUCTION_END();
@@ -2422,31 +2517,7 @@ JValue ExecuteGotoImpl(Thread* self, const DexFile::CodeItem* code_item, ShadowF
     UnexpectedOpcode(inst, shadow_frame);
   HANDLE_INSTRUCTION_END();
 
-  HANDLE_INSTRUCTION_START(UNUSED_F3)
-    UnexpectedOpcode(inst, shadow_frame);
-  HANDLE_INSTRUCTION_END();
-
   HANDLE_INSTRUCTION_START(UNUSED_F4)
-    UnexpectedOpcode(inst, shadow_frame);
-  HANDLE_INSTRUCTION_END();
-
-  HANDLE_INSTRUCTION_START(UNUSED_F5)
-    UnexpectedOpcode(inst, shadow_frame);
-  HANDLE_INSTRUCTION_END();
-
-  HANDLE_INSTRUCTION_START(UNUSED_F6)
-    UnexpectedOpcode(inst, shadow_frame);
-  HANDLE_INSTRUCTION_END();
-
-  HANDLE_INSTRUCTION_START(UNUSED_F7)
-    UnexpectedOpcode(inst, shadow_frame);
-  HANDLE_INSTRUCTION_END();
-
-  HANDLE_INSTRUCTION_START(UNUSED_F8)
-    UnexpectedOpcode(inst, shadow_frame);
-  HANDLE_INSTRUCTION_END();
-
-  HANDLE_INSTRUCTION_START(UNUSED_F9)
     UnexpectedOpcode(inst, shadow_frame);
   HANDLE_INSTRUCTION_END();
 
@@ -2484,6 +2555,8 @@ JValue ExecuteGotoImpl(Thread* self, const DexFile::CodeItem* code_item, ShadowF
     uint32_t found_dex_pc = FindNextInstructionFollowingException(self, shadow_frame, dex_pc,
                                                                   instrumentation);
     if (found_dex_pc == DexFile::kDexNoIndex) {
+      // Structured locking is to be enforced for abnormal termination, too.
+      shadow_frame.GetLockCountData().CheckAllMonitorsReleasedOrThrow<do_assignability_check>(self);
       return JValue(); /* Handled in caller. */
     } else {
       int32_t displacement = static_cast<int32_t>(found_dex_pc) - static_cast<int32_t>(dex_pc);
@@ -2515,16 +2588,16 @@ JValue ExecuteGotoImpl(Thread* self, const DexFile::CodeItem* code_item, ShadowF
 }  // NOLINT(readability/fn_size)
 
 // Explicit definitions of ExecuteGotoImpl.
-template SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) HOT_ATTR
+template SHARED_REQUIRES(Locks::mutator_lock_) HOT_ATTR
 JValue ExecuteGotoImpl<true, false>(Thread* self, const DexFile::CodeItem* code_item,
                                     ShadowFrame& shadow_frame, JValue result_register);
-template SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) HOT_ATTR
+template SHARED_REQUIRES(Locks::mutator_lock_) HOT_ATTR
 JValue ExecuteGotoImpl<false, false>(Thread* self, const DexFile::CodeItem* code_item,
                                      ShadowFrame& shadow_frame, JValue result_register);
-template SHARED_LOCKS_REQUIRED(Locks::mutator_lock_)
+template SHARED_REQUIRES(Locks::mutator_lock_)
 JValue ExecuteGotoImpl<true, true>(Thread* self, const DexFile::CodeItem* code_item,
                                    ShadowFrame& shadow_frame, JValue result_register);
-template SHARED_LOCKS_REQUIRED(Locks::mutator_lock_)
+template SHARED_REQUIRES(Locks::mutator_lock_)
 JValue ExecuteGotoImpl<false, true>(Thread* self, const DexFile::CodeItem* code_item,
                                     ShadowFrame& shadow_frame, JValue result_register);
 

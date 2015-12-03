@@ -100,9 +100,8 @@ class SetLengthVisitor {
   explicit SetLengthVisitor(int32_t length) : length_(length) {
   }
 
-  void operator()(Object* obj, size_t usable_size) const
-      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
-    UNUSED(usable_size);
+  void operator()(Object* obj, size_t usable_size ATTRIBUTE_UNUSED) const
+      SHARED_REQUIRES(Locks::mutator_lock_) {
     // Avoid AsArray as object is not yet in live bitmap or allocation stack.
     Array* array = down_cast<Array*>(obj);
     // DCHECK(array->IsArrayInstance());
@@ -126,7 +125,7 @@ class SetLengthToUsableSizeVisitor {
   }
 
   void operator()(Object* obj, size_t usable_size) const
-      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+      SHARED_REQUIRES(Locks::mutator_lock_) {
     // Avoid AsArray as object is not yet in live bitmap or allocation stack.
     Array* array = down_cast<Array*>(obj);
     // DCHECK(array->IsArrayInstance());
@@ -239,7 +238,7 @@ inline void PrimitiveArray<T>::Set(int32_t i, T value) {
 }
 
 template<typename T>
-template<bool kTransactionActive, bool kCheckTransaction>
+template<bool kTransactionActive, bool kCheckTransaction, VerifyObjectFlags kVerifyFlags>
 inline void PrimitiveArray<T>::SetWithoutChecks(int32_t i, T value) {
   if (kCheckTransaction) {
     DCHECK_EQ(kTransactionActive, Runtime::Current()->IsActiveTransaction());
@@ -247,7 +246,7 @@ inline void PrimitiveArray<T>::SetWithoutChecks(int32_t i, T value) {
   if (kTransactionActive) {
     Runtime::Current()->RecordWriteArray(this, i, GetWithoutChecks(i));
   }
-  DCHECK(CheckIsValidIndex(i));
+  DCHECK(CheckIsValidIndex<kVerifyFlags>(i));
   GetData()[i] = value;
 }
 // Backward copy where elements are of aligned appropriately for T. Count is in T sized units.
@@ -392,6 +391,19 @@ inline void PointerArray::SetElementPtrSize(uint32_t idx, T element, size_t ptr_
     DCHECK_LE((uintptr_t)element, 0xFFFFFFFFu);
     (kUnchecked ? down_cast<IntArray*>(static_cast<Object*>(this)) : AsIntArray())
         ->SetWithoutChecks<kTransactionActive>(idx, static_cast<uint32_t>((uintptr_t)element));
+  }
+}
+
+template <typename Visitor>
+inline void PointerArray::Fixup(mirror::PointerArray* dest,
+                                size_t pointer_size,
+                                const Visitor& visitor) {
+  for (size_t i = 0, count = GetLength(); i < count; ++i) {
+    void* ptr = GetElementPtrSize<void*>(i, pointer_size);
+    void* new_ptr = visitor(ptr);
+    if (ptr != new_ptr) {
+      dest->SetElementPtrSize<false, true>(i, new_ptr, pointer_size);
+    }
   }
 }
 

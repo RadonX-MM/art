@@ -22,6 +22,8 @@
 #include "atomic.h"
 #include "base/macros.h"
 #include "base/mutex.h"
+#include "gc/accounting/bitmap.h"
+#include "gc/allocator/dlmalloc.h"
 #include "gc_root.h"
 #include "jni.h"
 #include "oat_file.h"
@@ -32,99 +34,209 @@
 namespace art {
 
 class ArtMethod;
-class CompiledMethod;
-class CompilerCallbacks;
+class LinearAlloc;
+class ProfilingInfo;
 
 namespace jit {
 
 class JitInstrumentationCache;
 
+// Alignment in bits that will suit all architectures.
+static constexpr int kJitCodeAlignment = 16;
+using CodeCacheBitmap = gc::accounting::MemoryRangeBitmap<kJitCodeAlignment>;
+
 class JitCodeCache {
  public:
-  static constexpr size_t kMaxCapacity = 1 * GB;
-  static constexpr size_t kDefaultCapacity = 2 * MB;
+  static constexpr size_t kMaxCapacity = 64 * MB;
+  // Put the default to a very low amount for debug builds to stress the code cache
+  // collection.
+  static constexpr size_t kInitialCapacity = kIsDebugBuild ? 16 * KB : 64 * KB;
 
   // Create the code cache with a code + data capacity equal to "capacity", error message is passed
   // in the out arg error_msg.
-  static JitCodeCache* Create(size_t capacity, std::string* error_msg);
+  static JitCodeCache* Create(size_t initial_capacity, size_t max_capacity, std::string* error_msg);
 
-  const uint8_t* CodeCachePtr() const {
-    return code_cache_ptr_;
-  }
+  // Number of bytes allocated in the code cache.
+  size_t CodeCacheSize() REQUIRES(!lock_);
 
-  size_t CodeCacheSize() const {
-    return code_cache_ptr_ - code_cache_begin_;
-  }
+  // Number of bytes allocated in the data cache.
+  size_t DataCacheSize() REQUIRES(!lock_);
 
-  size_t CodeCacheRemain() const {
-    return code_cache_end_ - code_cache_ptr_;
-  }
+  // Number of compiled code in the code cache. Note that this is not the number
+  // of methods that got JIT compiled, as we might have collected some.
+  size_t NumberOfCompiledCode() REQUIRES(!lock_);
 
-  const uint8_t* DataCachePtr() const {
-    return data_cache_ptr_;
-  }
+  // Allocate and write code and its metadata to the code cache.
+  uint8_t* CommitCode(Thread* self,
+                      ArtMethod* method,
+                      const uint8_t* mapping_table,
+                      const uint8_t* vmap_table,
+                      const uint8_t* gc_map,
+                      size_t frame_size_in_bytes,
+                      size_t core_spill_mask,
+                      size_t fp_spill_mask,
+                      const uint8_t* code,
+                      size_t code_size)
+      SHARED_REQUIRES(Locks::mutator_lock_)
+      REQUIRES(!lock_);
 
-  size_t DataCacheSize() const {
-    return data_cache_ptr_ - data_cache_begin_;
-  }
+  // Return true if the code cache contains this pc.
+  bool ContainsPc(const void* pc) const;
 
-  size_t DataCacheRemain() const {
-    return data_cache_end_ - data_cache_ptr_;
-  }
+  // Return true if the code cache contains this method.
+  bool ContainsMethod(ArtMethod* method) REQUIRES(!lock_);
 
-  size_t NumMethods() const {
-    return num_methods_;
-  }
+  // Reserve a region of data of size at least "size". Returns null if there is no more room.
+  uint8_t* ReserveData(Thread* self, size_t size)
+      SHARED_REQUIRES(Locks::mutator_lock_)
+      REQUIRES(!lock_);
 
-  // Return true if the code cache contains the code pointer which si the entrypoint of the method.
-  bool ContainsMethod(ArtMethod* method) const
-      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-
-  // Return true if the code cache contains a code ptr.
-  bool ContainsCodePtr(const void* ptr) const;
-
-  // Reserve a region of code of size at least "size". Returns null if there is no more room.
-  uint8_t* ReserveCode(Thread* self, size_t size) LOCKS_EXCLUDED(lock_);
+  // Clear data from the data portion of the code cache.
+  void ClearData(Thread* self, void* data)
+      SHARED_REQUIRES(Locks::mutator_lock_)
+      REQUIRES(!lock_);
 
   // Add a data array of size (end - begin) with the associated contents, returns null if there
   // is no more room.
   uint8_t* AddDataArray(Thread* self, const uint8_t* begin, const uint8_t* end)
-      LOCKS_EXCLUDED(lock_);
+      SHARED_REQUIRES(Locks::mutator_lock_)
+      REQUIRES(!lock_);
 
-  // Get code for a method, returns null if it is not in the jit cache.
-  const void* GetCodeFor(ArtMethod* method)
-      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) LOCKS_EXCLUDED(lock_);
+  CodeCacheBitmap* GetLiveBitmap() const {
+    return live_bitmap_.get();
+  }
 
-  // Save the compiled code for a method so that GetCodeFor(method) will return old_code_ptr if the
-  // entrypoint isn't within the cache.
-  void SaveCompiledCode(ArtMethod* method, const void* old_code_ptr)
-      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) LOCKS_EXCLUDED(lock_);
+  // Perform a collection on the code cache.
+  void GarbageCollectCache(Thread* self)
+      REQUIRES(!lock_)
+      SHARED_REQUIRES(Locks::mutator_lock_);
+
+  // Given the 'pc', try to find the JIT compiled code associated with it.
+  // Return null if 'pc' is not in the code cache. 'method' is passed for
+  // sanity check.
+  OatQuickMethodHeader* LookupMethodHeader(uintptr_t pc, ArtMethod* method)
+      REQUIRES(!lock_)
+      SHARED_REQUIRES(Locks::mutator_lock_);
+
+  // Remove all methods in our cache that were allocated by 'alloc'.
+  void RemoveMethodsIn(Thread* self, const LinearAlloc& alloc)
+      REQUIRES(!lock_)
+      REQUIRES(Locks::classlinker_classes_lock_)
+      SHARED_REQUIRES(Locks::mutator_lock_);
+
+  // Create a 'ProfileInfo' for 'method'. If 'retry_allocation' is true,
+  // will collect and retry if the first allocation is unsuccessful.
+  ProfilingInfo* AddProfilingInfo(Thread* self,
+                                  ArtMethod* method,
+                                  const std::vector<uint32_t>& entries,
+                                  bool retry_allocation)
+      REQUIRES(!lock_)
+      SHARED_REQUIRES(Locks::mutator_lock_);
+
+  bool OwnsSpace(const void* mspace) const NO_THREAD_SAFETY_ANALYSIS {
+    return mspace == code_mspace_ || mspace == data_mspace_;
+  }
+
+  void* MoreCore(const void* mspace, intptr_t increment);
+
+  // Adds to `methods` all the compiled ArtMethods which are part of the given `oat_file`.
+  void GetCompiledArtMethods(const OatFile* oat_file, std::set<ArtMethod*>& methods)
+      REQUIRES(!lock_)
+      SHARED_REQUIRES(Locks::mutator_lock_);
+
+  uint64_t GetLastUpdateTimeNs() REQUIRES(!lock_);
 
  private:
-  // Takes ownership of code_mem_map.
-  explicit JitCodeCache(MemMap* code_mem_map);
+  // Take ownership of maps.
+  JitCodeCache(MemMap* code_map,
+               MemMap* data_map,
+               size_t initial_code_capacity,
+               size_t initial_data_capacity,
+               size_t max_capacity);
 
-  // Unimplemented, TODO: Determine if it is necessary.
-  void FlushInstructionCache();
+  // Internal version of 'CommitCode' that will not retry if the
+  // allocation fails. Return null if the allocation fails.
+  uint8_t* CommitCodeInternal(Thread* self,
+                              ArtMethod* method,
+                              const uint8_t* mapping_table,
+                              const uint8_t* vmap_table,
+                              const uint8_t* gc_map,
+                              size_t frame_size_in_bytes,
+                              size_t core_spill_mask,
+                              size_t fp_spill_mask,
+                              const uint8_t* code,
+                              size_t code_size)
+      REQUIRES(!lock_)
+      SHARED_REQUIRES(Locks::mutator_lock_);
 
-  // Lock which guards.
+  ProfilingInfo* AddProfilingInfoInternal(Thread* self,
+                                          ArtMethod* method,
+                                          const std::vector<uint32_t>& entries)
+      REQUIRES(!lock_)
+      SHARED_REQUIRES(Locks::mutator_lock_);
+
+  // If a collection is in progress, wait for it to finish. Return
+  // whether the thread actually waited.
+  bool WaitForPotentialCollectionToComplete(Thread* self)
+      REQUIRES(lock_) REQUIRES(!Locks::mutator_lock_);
+
+  // Free in the mspace allocations taken by 'method'.
+  void FreeCode(const void* code_ptr, ArtMethod* method) REQUIRES(lock_);
+
+  // Number of bytes allocated in the code cache.
+  size_t CodeCacheSizeLocked() REQUIRES(lock_);
+
+  // Number of bytes allocated in the data cache.
+  size_t DataCacheSizeLocked() REQUIRES(lock_);
+
+  // Notify all waiting threads that a collection is done.
+  void NotifyCollectionDone(Thread* self) REQUIRES(lock_);
+
+  // Try to increase the current capacity of the code cache. Return whether we
+  // succeeded at doing so.
+  bool IncreaseCodeCacheCapacity() REQUIRES(lock_);
+
+  // Set the footprint limit of the code cache.
+  void SetFootprintLimit(size_t new_footprint) REQUIRES(lock_);
+
+  // Lock for guarding allocations, collections, and the method_code_map_.
   Mutex lock_;
-  // Mem map which holds code and data. We do this since we need to have 32 bit offsets from method
-  // headers in code cache which point to things in the data cache. If the maps are more than 4GB
-  // apart, having multiple maps wouldn't work.
-  std::unique_ptr<MemMap> mem_map_;
-  // Code cache section.
-  uint8_t* code_cache_ptr_;
-  const uint8_t* code_cache_begin_;
-  const uint8_t* code_cache_end_;
-  // Data cache section.
-  uint8_t* data_cache_ptr_;
-  const uint8_t* data_cache_begin_;
-  const uint8_t* data_cache_end_;
-  size_t num_methods_;
-  // This map holds code for methods if they were deoptimized by the instrumentation stubs. This is
-  // required since we have to implement ClassLinker::GetQuickOatCodeFor for walking stacks.
-  SafeMap<ArtMethod*, const void*> method_code_map_ GUARDED_BY(lock_);
+  // Condition to wait on during collection.
+  ConditionVariable lock_cond_ GUARDED_BY(lock_);
+  // Whether there is a code cache collection in progress.
+  bool collection_in_progress_ GUARDED_BY(lock_);
+  // Mem map which holds code.
+  std::unique_ptr<MemMap> code_map_;
+  // Mem map which holds data (stack maps and profiling info).
+  std::unique_ptr<MemMap> data_map_;
+  // The opaque mspace for allocating code.
+  void* code_mspace_ GUARDED_BY(lock_);
+  // The opaque mspace for allocating data.
+  void* data_mspace_ GUARDED_BY(lock_);
+  // Bitmap for collecting code and data.
+  std::unique_ptr<CodeCacheBitmap> live_bitmap_;
+  // This map holds compiled code associated to the ArtMethod.
+  SafeMap<const void*, ArtMethod*> method_code_map_ GUARDED_BY(lock_);
+  // ProfilingInfo objects we have allocated.
+  std::vector<ProfilingInfo*> profiling_infos_ GUARDED_BY(lock_);
+
+  // The maximum capacity in bytes this code cache can go to.
+  size_t max_capacity_ GUARDED_BY(lock_);
+
+  // The current capacity in bytes of the code cache.
+  size_t current_capacity_ GUARDED_BY(lock_);
+
+  // The current footprint in bytes of the code portion of the code cache.
+  size_t code_end_ GUARDED_BY(lock_);
+
+  // The current footprint in bytes of the data portion of the code cache.
+  size_t data_end_ GUARDED_BY(lock_);
+
+  // Whether a collection has already been done on the current capacity.
+  bool has_done_one_collection_ GUARDED_BY(lock_);
+
+  // Last time the the code_cache was updated.
+  uint64_t last_update_time_ns_ GUARDED_BY(lock_);
 
   DISALLOW_IMPLICIT_CONSTRUCTORS(JitCodeCache);
 };

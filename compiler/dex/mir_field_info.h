@@ -26,6 +26,7 @@ namespace art {
 
 class CompilerDriver;
 class DexCompilationUnit;
+class ScopedObjectAccess;
 
 /*
  * Field info is calculated from the perspective of the compilation unit that accesses
@@ -133,12 +134,15 @@ class MirIFieldLoweringInfo : public MirFieldInfo {
   // For each requested instance field retrieve the field's declaring location (dex file, class
   // index and field index) and volatility and compute whether we can fast path the access
   // with IGET/IPUT. For fast path fields, retrieve the field offset.
-  static void Resolve(CompilerDriver* compiler_driver, const DexCompilationUnit* mUnit,
-                      MirIFieldLoweringInfo* field_infos, size_t count)
-      LOCKS_EXCLUDED(Locks::mutator_lock_);
+  static void Resolve(const ScopedObjectAccess& soa,
+                      CompilerDriver* compiler_driver,
+                      const DexCompilationUnit* mUnit,
+                      MirIFieldLoweringInfo* field_infos,
+                      size_t count)
+      SHARED_REQUIRES(Locks::mutator_lock_);
 
   // Construct an unresolved instance field lowering info.
-  explicit MirIFieldLoweringInfo(uint16_t field_idx, DexMemAccessType type, bool is_quickened)
+  MirIFieldLoweringInfo(uint16_t field_idx, DexMemAccessType type, bool is_quickened)
       : MirFieldInfo(field_idx,
                      kFlagIsVolatile | (is_quickened ? kFlagIsQuickened : 0u),
                      type),  // Without kFlagIsStatic.
@@ -192,10 +196,10 @@ class MirSFieldLoweringInfo : public MirFieldInfo {
   // and the type index of the declaring class in the compiled method's dex file.
   static void Resolve(CompilerDriver* compiler_driver, const DexCompilationUnit* mUnit,
                       MirSFieldLoweringInfo* field_infos, size_t count)
-      LOCKS_EXCLUDED(Locks::mutator_lock_);
+      REQUIRES(!Locks::mutator_lock_);
 
   // Construct an unresolved static field lowering info.
-  explicit MirSFieldLoweringInfo(uint16_t field_idx, DexMemAccessType type)
+  MirSFieldLoweringInfo(uint16_t field_idx, DexMemAccessType type)
       : MirFieldInfo(field_idx, kFlagIsVolatile | kFlagIsStatic, type),
         field_offset_(0u),
         storage_index_(DexFile::kDexNoIndex) {

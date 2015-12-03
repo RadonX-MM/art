@@ -16,6 +16,7 @@
 
 #include "linker/relative_patcher_test.h"
 #include "linker/arm64/relative_patcher_arm64.h"
+#include "oat_quick_method_header.h"
 
 namespace art {
 namespace linker {
@@ -66,7 +67,7 @@ class Arm64RelativePatcherTest : public RelativePatcherTest {
     // We want to put the method3 at a very precise offset.
     const uint32_t last_method_offset = method1_offset + distance_without_thunks;
     const uint32_t gap_end = last_method_offset - sizeof(OatQuickMethodHeader);
-    CHECK(IsAligned<kArm64Alignment>(gap_end));
+    CHECK_ALIGNED(gap_end, kArm64Alignment);
 
     // Fill the gap with intermediate methods in chunks of 2MiB and the last in [2MiB, 4MiB).
     // (This allows deduplicating the small chunks to avoid using 256MiB of memory for +-128MiB
@@ -236,7 +237,7 @@ class Arm64RelativePatcherTest : public RelativePatcherTest {
     CHECK(!compiled_method_refs_.empty());
     CHECK_EQ(compiled_method_refs_[0].dex_method_index, 1u);
     CHECK_EQ(compiled_method_refs_.size(), compiled_methods_.size());
-    uint32_t method1_size = compiled_methods_[0]->GetQuickCode()->size();
+    uint32_t method1_size = compiled_methods_[0]->GetQuickCode().size();
     uint32_t thunk_offset = CompiledCode::AlignCode(method1_offset + method1_size, kArm64);
     uint32_t b_diff = thunk_offset - (method1_offset + num_nops * 4u);
     ASSERT_EQ(b_diff & 3u, 0u);
@@ -385,6 +386,39 @@ TEST_F(Arm64RelativePatcherTestDefault, CallTrampoline) {
   EXPECT_TRUE(CheckLinkedMethod(MethodRef(1u), ArrayRef<const uint8_t>(expected_code)));
 }
 
+TEST_F(Arm64RelativePatcherTestDefault, CallTrampolineTooFar) {
+  constexpr uint32_t missing_method_index = 1024u;
+  auto last_method_raw_code = GenNopsAndBl(1u, kBlPlus0);
+  constexpr uint32_t bl_offset_in_last_method = 1u * 4u;  // After NOPs.
+  ArrayRef<const uint8_t> last_method_code(last_method_raw_code);
+  ASSERT_EQ(bl_offset_in_last_method + 4u, last_method_code.size());
+  LinkerPatch last_method_patches[] = {
+      LinkerPatch::RelativeCodePatch(bl_offset_in_last_method, nullptr, missing_method_index),
+  };
+
+  constexpr uint32_t just_over_max_negative_disp = 128 * MB + 4;
+  uint32_t last_method_idx = Create2MethodsWithGap(
+      kNopCode, ArrayRef<const LinkerPatch>(), last_method_code,
+      ArrayRef<const LinkerPatch>(last_method_patches),
+      just_over_max_negative_disp - bl_offset_in_last_method);
+  uint32_t method1_offset = GetMethodOffset(1u);
+  uint32_t last_method_offset = GetMethodOffset(last_method_idx);
+  ASSERT_EQ(method1_offset,
+            last_method_offset + bl_offset_in_last_method - just_over_max_negative_disp);
+  ASSERT_FALSE(method_offset_map_.FindMethodOffset(MethodRef(missing_method_index)).first);
+
+  // Check linked code.
+  uint32_t thunk_offset =
+      CompiledCode::AlignCode(last_method_offset + last_method_code.size(), kArm64);
+  uint32_t diff = thunk_offset - (last_method_offset + bl_offset_in_last_method);
+  ASSERT_EQ(diff & 3u, 0u);
+  ASSERT_LT(diff, 128 * MB);
+  auto expected_code = GenNopsAndBl(1u, kBlPlus0 | (diff >> 2));
+  EXPECT_TRUE(CheckLinkedMethod(MethodRef(last_method_idx),
+                                ArrayRef<const uint8_t>(expected_code)));
+  EXPECT_TRUE(CheckThunk(thunk_offset));
+}
+
 TEST_F(Arm64RelativePatcherTestDefault, CallOtherAlmostTooFarAfter) {
   auto method1_raw_code = GenNopsAndBl(1u, kBlPlus0);
   constexpr uint32_t bl_offset_in_method1 = 1u * 4u;  // After NOPs.
@@ -396,8 +430,10 @@ TEST_F(Arm64RelativePatcherTestDefault, CallOtherAlmostTooFarAfter) {
   };
 
   constexpr uint32_t max_positive_disp = 128 * MB - 4u;
-  uint32_t last_method_idx = Create2MethodsWithGap(method1_code, method1_patches,
-                                                   kNopCode, ArrayRef<const LinkerPatch>(),
+  uint32_t last_method_idx = Create2MethodsWithGap(method1_code,
+                                                   ArrayRef<const LinkerPatch>(method1_patches),
+                                                   kNopCode,
+                                                   ArrayRef<const LinkerPatch>(),
                                                    bl_offset_in_method1 + max_positive_disp);
   ASSERT_EQ(expected_last_method_idx, last_method_idx);
 
@@ -420,8 +456,10 @@ TEST_F(Arm64RelativePatcherTestDefault, CallOtherAlmostTooFarBefore) {
   };
 
   constexpr uint32_t max_negative_disp = 128 * MB;
-  uint32_t last_method_idx = Create2MethodsWithGap(kNopCode, ArrayRef<const LinkerPatch>(),
-                                                   last_method_code, last_method_patches,
+  uint32_t last_method_idx = Create2MethodsWithGap(kNopCode,
+                                                   ArrayRef<const LinkerPatch>(),
+                                                   last_method_code,
+                                                   ArrayRef<const LinkerPatch>(last_method_patches),
                                                    max_negative_disp - bl_offset_in_last_method);
   uint32_t method1_offset = GetMethodOffset(1u);
   uint32_t last_method_offset = GetMethodOffset(last_method_idx);
@@ -445,7 +483,10 @@ TEST_F(Arm64RelativePatcherTestDefault, CallOtherJustTooFarAfter) {
 
   constexpr uint32_t just_over_max_positive_disp = 128 * MB;
   uint32_t last_method_idx = Create2MethodsWithGap(
-      method1_code, method1_patches, kNopCode, ArrayRef<const LinkerPatch>(),
+      method1_code,
+      ArrayRef<const LinkerPatch>(method1_patches),
+      kNopCode,
+      ArrayRef<const LinkerPatch>(),
       bl_offset_in_method1 + just_over_max_positive_disp);
   ASSERT_EQ(expected_last_method_idx, last_method_idx);
 
@@ -474,7 +515,8 @@ TEST_F(Arm64RelativePatcherTestDefault, CallOtherJustTooFarBefore) {
 
   constexpr uint32_t just_over_max_negative_disp = 128 * MB + 4;
   uint32_t last_method_idx = Create2MethodsWithGap(
-      kNopCode, ArrayRef<const LinkerPatch>(), last_method_code, last_method_patches,
+      kNopCode, ArrayRef<const LinkerPatch>(), last_method_code,
+      ArrayRef<const LinkerPatch>(last_method_patches),
       just_over_max_negative_disp - bl_offset_in_last_method);
   uint32_t method1_offset = GetMethodOffset(1u);
   uint32_t last_method_offset = GetMethodOffset(last_method_idx);

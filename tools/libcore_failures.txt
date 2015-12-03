@@ -21,28 +21,35 @@
   name: "libcore.java.lang.SystemTest#testSystemProperties_mutable"
 },
 {
-  description: "Differences between vogar and cts",
+  description: "Differences between vogar and cts. Passes with --mode activity",
   result: EXEC_FAILED,
   modes: [device],
-  names: ["libcore.java.lang.OldSystemTest#test_getProperties",
-          "org.apache.harmony.tests.java.lang.Process2Test#test_getErrorStream",
-          "org.apache.harmony.tests.java.lang.ProcessTest#test_exitValue"]
+  names: ["libcore.java.lang.OldSystemTest#test_getProperties"]
 },
 {
-  description: "Failures needing investigation",
+  description: "Differences between vogar and cts. EACCESS when run with vogar.
+                Passes on host, passes with cts. Passes with vogar with su
+                (--invoke-with \"su root\"). Does not pass after setting chmod
+                777 all directories on path to socket (on device without su).",
+  result: EXEC_FAILED,
+  modes: [device],
+  names: ["libcore.io.OsTest#testUnixDomainSockets_in_file_system"]
+},
+{
+  description: "Issue with incorrect device time (1970)",
   result: EXEC_FAILED,
   modes: [device],
   names: ["libcore.java.util.TimeZoneTest#testDisplayNames",
           "libcore.java.util.TimeZoneTest#test_useDaylightTime_Taiwan",
-          "libcore.java.util.TimeZoneTest#testAllDisplayNames",
-          "libcore.io.OsTest#testUnixDomainSockets_in_file_system",
-          "org.apache.harmony.luni.tests.java.net.URLConnectionTest#test_setReadTimeoutI",
-          "org.apache.harmony.tests.java.util.DateTest#test_Constructor",
-          "org.apache.harmony.tests.java.util.ScannerTest#test_Constructor_LReadableByteChannel",
-          "org.apache.harmony.tests.java.util.TimeZoneTest#test_hasSameRules_Ljava_util_TimeZone",
-          "org.apache.harmony.tests.java.text.ChoiceFormatTest#testEscapedPatternWithConsecutiveQuotes",
-          "org.apache.harmony.tests.java.text.ChoiceFormatTest#testToPatternWithInfinities",
-          "org.apache.harmony.tests.java.text.MessageFormatTest#test19011159"]
+          "org.apache.harmony.tests.java.util.TimeZoneTest#test_hasSameRules_Ljava_util_TimeZone"],
+  bug: 20879084
+},
+{
+  description: "Issue with incorrect device time (1970). Test assumes that DateTime.now()
+                is greater then a date in 1998.",
+  result: EXEC_FAILED,
+  modes: [device],
+  names: ["org.apache.harmony.tests.java.util.DateTest#test_Constructor"]
 },
 {
   description: "Failing due to a locale problem on hammerhead.",
@@ -74,7 +81,8 @@
           "libcore.net.NetworkSecurityPolicyTest#testCleartextTrafficPolicyWithJarHttpURLConnection",
           "org.apache.harmony.luni.tests.internal.net.www.protocol.http.HttpURLConnectionTest",
           "org.apache.harmony.luni.tests.internal.net.www.protocol.https.HttpsURLConnectionTest",
-          "org.apache.harmony.luni.tests.java.net.URLConnectionTest"
+          "org.apache.harmony.luni.tests.java.net.URLConnectionTest",
+          "org.apache.harmony.tests.java.util.ScannerTest#test_Constructor_LReadableByteChannel"
          ]
 },
 {
@@ -102,23 +110,10 @@
   bug: 18869265
 },
 {
-  description: "Test sometimes timeouts on volantis",
+  description: "Test sometimes timeouts on volantis, and on most modes in debug mode",
   result: EXEC_TIMEOUT,
-  modes_variants: [[device,X64]],
   names: ["libcore.java.lang.SystemTest#testArrayCopyConcurrentModification"],
   bug: 19165288
-},
-{
-  description: "Bug in libcore",
-  result: EXEC_FAILED,
-  names: ["libcore.javax.crypto.ECDHKeyAgreementTest#testInit_withUnsupportedPrivateKeyType"],
-  bug: 19730263
-},
-{
-  description: "Needs to be run as root",
-  result: EXEC_FAILED,
-  modes: [host],
-  names: ["libcore.io.OsTest#test_PacketSocketAddress"]
 },
 {
   description: "Needs kernel updates on host/device",
@@ -130,5 +125,50 @@
   modes: [device],
   result: EXEC_FAILED,
   names: ["org.apache.harmony.tests.java.lang.ProcessManagerTest#testEnvironment"]
+},
+{
+  description: "Crypto failures",
+  result: EXEC_FAILED,
+  names: ["libcore.javax.crypto.CipherTest#testCipher_ShortBlock_Failure",
+          "libcore.javax.crypto.CipherTest#testCipher_Success"]
+},
+{
+  description: "Flake when running with libartd.so or interpreter",
+  result: EXEC_FAILED,
+  bug:22106064,
+  name: "libcore.java.lang.OldThreadGroupTest#test_enumerateLThreadArrayLZtest_enumerateLThreadArrayLZ"
+},
+{
+  description: "test_xattr fails on arm64 on the buildbots only: needs investigation",
+  result: EXEC_FAILED,
+  modes: [device],
+  names: ["libcore.io.OsTest#test_xattr"],
+  bug: 22258911
+},
+{
+  description: "fails on L builds: needs investigation",
+  result: EXEC_FAILED,
+  modes: [device],
+  names: ["org.apache.harmony.tests.java.lang.ClassTest#test_forNameLjava_lang_String"]
+},
+{
+  description: "TimeZoneTest.testAllDisplayNames times out, needs investigation",
+  result: EXEC_TIMEOUT,
+  modes: [device],
+  names: ["libcore.java.util.TimeZoneTest#testAllDisplayNames"],
+  bug: 22786792
+},
+{
+  description: "Lack of IPv6 on some buildbot slaves",
+  result: EXEC_FAILED,
+  names: ["libcore.io.OsTest#test_byteBufferPositions_sendto_recvfrom_af_inet6",
+          "libcore.io.OsTest#test_sendtoSocketAddress_af_inet6"],
+  bug: 25178637
+},
+{
+  description: "Non-deterministic test because of a dependency on weak ref collection.",
+  result: EXEC_FAILED,
+  names: ["org.apache.harmony.tests.java.util.WeakHashMapTest#test_keySet"],
+  bug: 25437292
 }
 ]

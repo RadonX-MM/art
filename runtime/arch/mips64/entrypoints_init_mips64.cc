@@ -15,7 +15,6 @@
  */
 
 #include "atomic.h"
-#include "entrypoints/interpreter/interpreter_entrypoints.h"
 #include "entrypoints/jni/jni_entrypoints.h"
 #include "entrypoints/quick/quick_alloc_entrypoints.h"
 #include "entrypoints/quick/quick_default_externs.h"
@@ -57,12 +56,7 @@ extern "C" double fmod(double a, double b);     // REM_DOUBLE[_2ADDR]
 extern "C" int64_t __divdi3(int64_t, int64_t);
 extern "C" int64_t __moddi3(int64_t, int64_t);
 
-void InitEntryPoints(InterpreterEntryPoints* ipoints, JniEntryPoints* jpoints,
-                     QuickEntryPoints* qpoints) {
-  // Interpreter
-  ipoints->pInterpreterToInterpreterBridge = artInterpreterToInterpreterBridge;
-  ipoints->pInterpreterToCompiledCodeBridge = artInterpreterToCompiledCodeBridge;
-
+void InitEntryPoints(JniEntryPoints* jpoints, QuickEntryPoints* qpoints) {
   // JNI
   jpoints->pDlsymLookup = art_jni_dlsym_lookup_stub;
 
@@ -176,16 +170,18 @@ void InitEntryPoints(InterpreterEntryPoints* ipoints, JniEntryPoints* jpoints,
   qpoints->pThrowNullPointer = art_quick_throw_null_pointer_exception;
   qpoints->pThrowStackOverflow = art_quick_throw_stack_overflow;
 
-  // Deoptimize
-  qpoints->pDeoptimize = art_quick_deoptimize;
+  // Deoptimization from compiled code.
+  qpoints->pDeoptimize = art_quick_deoptimize_from_compiled_code;
 
   // TODO - use lld/scd instructions for Mips64
   // Atomic 64-bit load/store
   qpoints->pA64Load = QuasiAtomic::Read64;
   qpoints->pA64Store = QuasiAtomic::Write64;
 
-  // Read barrier
+  // Read barrier.
   qpoints->pReadBarrierJni = ReadBarrierJni;
+  qpoints->pReadBarrierSlow = artReadBarrierSlow;
+  qpoints->pReadBarrierForRootSlow = artReadBarrierForRootSlow;
 };
 
 }  // namespace art

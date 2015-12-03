@@ -1414,8 +1414,7 @@ void Mir2Lir::CheckRegLocationImpl(RegLocation rl, bool fail, bool report) const
       rl.ref ? RefCheck::kCheckRef : RefCheck::kCheckNotRef, FPCheck::kIgnoreFP, fail, report);
 }
 
-size_t Mir2Lir::GetInstructionOffset(LIR* lir) {
-  UNUSED(lir);
+size_t Mir2Lir::GetInstructionOffset(LIR* lir ATTRIBUTE_UNUSED) {
   UNIMPLEMENTED(FATAL) << "Unsupported GetInstructionOffset()";
   UNREACHABLE();
 }

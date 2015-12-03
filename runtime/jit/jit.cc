@@ -19,13 +19,15 @@
 #include <dlfcn.h>
 
 #include "art_method-inl.h"
+#include "debugger.h"
 #include "entrypoints/runtime_asm_entrypoints.h"
 #include "interpreter/interpreter.h"
 #include "jit_code_cache.h"
 #include "jit_instrumentation.h"
+#include "oat_file_manager.h"
+#include "offline_profiling_info.h"
 #include "runtime.h"
 #include "runtime_options.h"
-#include "thread_list.h"
 #include "utils.h"
 
 namespace art {
@@ -34,19 +36,25 @@ namespace jit {
 JitOptions* JitOptions::CreateFromRuntimeArguments(const RuntimeArgumentMap& options) {
   auto* jit_options = new JitOptions;
   jit_options->use_jit_ = options.GetOrDefault(RuntimeArgumentMap::UseJIT);
-  jit_options->code_cache_capacity_ =
-      options.GetOrDefault(RuntimeArgumentMap::JITCodeCacheCapacity);
+  jit_options->code_cache_initial_capacity_ =
+      options.GetOrDefault(RuntimeArgumentMap::JITCodeCacheInitialCapacity);
+  jit_options->code_cache_max_capacity_ =
+      options.GetOrDefault(RuntimeArgumentMap::JITCodeCacheMaxCapacity);
   jit_options->compile_threshold_ =
       options.GetOrDefault(RuntimeArgumentMap::JITCompileThreshold);
+  jit_options->warmup_threshold_ =
+      options.GetOrDefault(RuntimeArgumentMap::JITWarmupThreshold);
   jit_options->dump_info_on_shutdown_ =
       options.Exists(RuntimeArgumentMap::DumpJITInfoOnShutdown);
+  jit_options->save_profiling_info_ =
+      options.GetOrDefault(RuntimeArgumentMap::JITSaveProfilingInfo);;
   return jit_options;
 }
 
 void Jit::DumpInfo(std::ostream& os) {
   os << "Code cache size=" << PrettySize(code_cache_->CodeCacheSize())
      << " data cache size=" << PrettySize(code_cache_->DataCacheSize())
-     << " num methods=" << code_cache_->NumMethods()
+     << " number of compiled code=" << code_cache_->NumberOfCompiledCode()
      << "\n";
   cumulative_timings_.Dump(os);
 }
@@ -67,13 +75,19 @@ Jit* Jit::Create(JitOptions* options, std::string* error_msg) {
   if (!jit->LoadCompiler(error_msg)) {
     return nullptr;
   }
-  jit->code_cache_.reset(JitCodeCache::Create(options->GetCodeCacheCapacity(), error_msg));
+  jit->code_cache_.reset(JitCodeCache::Create(
+      options->GetCodeCacheInitialCapacity(), options->GetCodeCacheMaxCapacity(), error_msg));
   if (jit->GetCodeCache() == nullptr) {
     return nullptr;
   }
-  LOG(INFO) << "JIT created with code_cache_capacity="
-      << PrettySize(options->GetCodeCacheCapacity())
-      << " compile_threshold=" << options->GetCompileThreshold();
+  jit->offline_profile_info_.reset(nullptr);
+  if (options->GetSaveProfilingInfo()) {
+    jit->offline_profile_info_.reset(new OfflineProfilingInfo());
+  }
+  LOG(INFO) << "JIT created with initial_capacity="
+      << PrettySize(options->GetCodeCacheInitialCapacity())
+      << ", max_capacity=" << PrettySize(options->GetCodeCacheMaxCapacity())
+      << ", compile_threshold=" << options->GetCompileThreshold();
   return jit.release();
 }
 
@@ -132,11 +146,7 @@ bool Jit::CompileMethod(ArtMethod* method, Thread* self) {
     VLOG(jit) << "JIT not compiling " << PrettyMethod(method) << " due to breakpoint";
     return false;
   }
-  const bool result = jit_compile_method_(jit_compiler_handle_, method, self);
-  if (result) {
-    method->SetEntryPointFromInterpreter(artInterpreterToCompiledCodeBridge);
-  }
-  return result;
+  return jit_compile_method_(jit_compiler_handle_, method, self);
 }
 
 void Jit::CreateThreadPool() {
@@ -146,7 +156,34 @@ void Jit::CreateThreadPool() {
 
 void Jit::DeleteThreadPool() {
   if (instrumentation_cache_.get() != nullptr) {
-    instrumentation_cache_->DeleteThreadPool();
+    instrumentation_cache_->DeleteThreadPool(Thread::Current());
+  }
+}
+
+void Jit::SaveProfilingInfo(const std::string& filename) {
+  if (offline_profile_info_ == nullptr) {
+    return;
+  }
+  // Note that we can't check the PrimaryOatFile when constructing the offline_profilie_info_
+  // because it becomes known to the Runtime after we create and initialize the JIT.
+  const OatFile* primary_oat_file = Runtime::Current()->GetOatFileManager().GetPrimaryOatFile();
+  if (primary_oat_file == nullptr) {
+    LOG(WARNING) << "Couldn't find a primary oat file when trying to save profile info to "
+                 << filename;
+    return;
+  }
+
+  uint64_t last_update_ns = code_cache_->GetLastUpdateTimeNs();
+  if (offline_profile_info_->NeedsSaving(last_update_ns)) {
+    VLOG(profiler) << "Iniate save profiling information to: " << filename;
+    std::set<ArtMethod*> methods;
+    {
+      ScopedObjectAccess soa(Thread::Current());
+      code_cache_->GetCompiledArtMethods(primary_oat_file, methods);
+    }
+    offline_profile_info_->SaveProfilingInfo(filename, last_update_ns, methods);
+  } else {
+    VLOG(profiler) << "No need to save profiling information to: " << filename;
   }
 }
 
@@ -163,18 +200,10 @@ Jit::~Jit() {
   }
 }
 
-void Jit::CreateInstrumentationCache(size_t compile_threshold) {
+void Jit::CreateInstrumentationCache(size_t compile_threshold, size_t warmup_threshold) {
   CHECK_GT(compile_threshold, 0U);
-  Runtime* const runtime = Runtime::Current();
-  runtime->GetThreadList()->SuspendAll(__FUNCTION__);
-  // Add Jit interpreter instrumentation, tells the interpreter when to notify the jit to compile
-  // something.
-  instrumentation_cache_.reset(new jit::JitInstrumentationCache(compile_threshold));
-  runtime->GetInstrumentation()->AddListener(
-      new jit::JitInstrumentationListener(instrumentation_cache_.get()),
-      instrumentation::Instrumentation::kMethodEntered |
-      instrumentation::Instrumentation::kBackwardBranch);
-  runtime->GetThreadList()->ResumeAll();
+  instrumentation_cache_.reset(
+      new jit::JitInstrumentationCache(compile_threshold, warmup_threshold));
 }
 
 }  // namespace jit

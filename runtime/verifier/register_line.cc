@@ -155,6 +155,9 @@ std::string RegisterLine::Dump(MethodVerifier* verifier) const {
   for (const auto& monitor : monitors_) {
     result += StringPrintf("{%d},", monitor);
   }
+  for (auto& pairs : reg_to_lock_depths_) {
+    result += StringPrintf("<%d -> %x>", pairs.first, pairs.second);
+  }
   return result;
 }
 
@@ -175,7 +178,7 @@ void RegisterLine::CopyResultRegister1(MethodVerifier* verifier, uint32_t vdst, 
         << "copyRes1 v" << vdst << "<- result0"  << " type=" << type;
   } else {
     DCHECK(verifier->GetRegTypeCache()->GetFromId(result_[1]).IsUndefined());
-    SetRegisterType(verifier, vdst, type);
+    SetRegisterType<LockOp::kClear>(verifier, vdst, type);
     result_[0] = verifier->GetRegTypeCache()->Undefined().GetId();
   }
 }
@@ -201,7 +204,7 @@ void RegisterLine::CopyResultRegister2(MethodVerifier* verifier, uint32_t vdst) 
 void RegisterLine::CheckUnaryOp(MethodVerifier* verifier, const Instruction* inst,
                                 const RegType& dst_type, const RegType& src_type) {
   if (VerifyRegisterType(verifier, inst->VRegB_12x(), src_type)) {
-    SetRegisterType(verifier, inst->VRegA_12x(), dst_type);
+    SetRegisterType<LockOp::kClear>(verifier, inst->VRegA_12x(), dst_type);
   }
 }
 
@@ -225,7 +228,7 @@ void RegisterLine::CheckUnaryOpFromWide(MethodVerifier* verifier, const Instruct
                                         const RegType& dst_type,
                                         const RegType& src_type1, const RegType& src_type2) {
   if (VerifyRegisterTypeWide(verifier, inst->VRegB_12x(), src_type1, src_type2)) {
-    SetRegisterType(verifier, inst->VRegA_12x(), dst_type);
+    SetRegisterType<LockOp::kClear>(verifier, inst->VRegA_12x(), dst_type);
   }
 }
 
@@ -241,11 +244,13 @@ void RegisterLine::CheckBinaryOp(MethodVerifier* verifier, const Instruction* in
       DCHECK(dst_type.IsInteger());
       if (GetRegisterType(verifier, vregB).IsBooleanTypes() &&
           GetRegisterType(verifier, vregC).IsBooleanTypes()) {
-        SetRegisterType(verifier, inst->VRegA_23x(), verifier->GetRegTypeCache()->Boolean());
+        SetRegisterType<LockOp::kClear>(verifier,
+                                        inst->VRegA_23x(),
+                                        verifier->GetRegTypeCache()->Boolean());
         return;
       }
     }
-    SetRegisterType(verifier, inst->VRegA_23x(), dst_type);
+    SetRegisterType<LockOp::kClear>(verifier, inst->VRegA_23x(), dst_type);
   }
 }
 
@@ -279,11 +284,13 @@ void RegisterLine::CheckBinaryOp2addr(MethodVerifier* verifier, const Instructio
       DCHECK(dst_type.IsInteger());
       if (GetRegisterType(verifier, vregA).IsBooleanTypes() &&
           GetRegisterType(verifier, vregB).IsBooleanTypes()) {
-        SetRegisterType(verifier, vregA, verifier->GetRegTypeCache()->Boolean());
+        SetRegisterType<LockOp::kClear>(verifier,
+                                        vregA,
+                                        verifier->GetRegTypeCache()->Boolean());
         return;
       }
     }
-    SetRegisterType(verifier, vregA, dst_type);
+    SetRegisterType<LockOp::kClear>(verifier, vregA, dst_type);
   }
 }
 
@@ -321,13 +328,17 @@ void RegisterLine::CheckLiteralOp(MethodVerifier* verifier, const Instruction* i
       /* check vB with the call, then check the constant manually */
       const uint32_t val = is_lit16 ? inst->VRegC_22s() : inst->VRegC_22b();
       if (GetRegisterType(verifier, vregB).IsBooleanTypes() && (val == 0 || val == 1)) {
-        SetRegisterType(verifier, vregA, verifier->GetRegTypeCache()->Boolean());
+        SetRegisterType<LockOp::kClear>(verifier,
+                                        vregA,
+                                        verifier->GetRegTypeCache()->Boolean());
         return;
       }
     }
-    SetRegisterType(verifier, vregA, dst_type);
+    SetRegisterType<LockOp::kClear>(verifier, vregA, dst_type);
   }
 }
+
+static constexpr uint32_t kVirtualNullRegister = std::numeric_limits<uint32_t>::max();
 
 void RegisterLine::PushMonitor(MethodVerifier* verifier, uint32_t reg_idx, int32_t insn_idx) {
   const RegType& reg_type = GetRegisterType(verifier, reg_idx);
@@ -335,14 +346,28 @@ void RegisterLine::PushMonitor(MethodVerifier* verifier, uint32_t reg_idx, int32
     verifier->Fail(VERIFY_ERROR_BAD_CLASS_HARD) << "monitor-enter on non-object ("
         << reg_type << ")";
   } else if (monitors_.size() >= 32) {
-    verifier->Fail(VERIFY_ERROR_BAD_CLASS_HARD) << "monitor-enter stack overflow: "
-        << monitors_.size();
+    verifier->Fail(VERIFY_ERROR_LOCKING);
+    if (kDumpLockFailures) {
+      LOG(WARNING) << "monitor-enter stack overflow while verifying "
+                   << PrettyMethod(verifier->GetMethodReference().dex_method_index,
+                                   *verifier->GetMethodReference().dex_file);
+    }
   } else {
     if (SetRegToLockDepth(reg_idx, monitors_.size())) {
+      // Null literals can establish aliases that we can't easily track. As such, handle the zero
+      // case as the 2^32-1 register (which isn't available in dex bytecode).
+      if (reg_type.IsZero()) {
+        SetRegToLockDepth(kVirtualNullRegister, monitors_.size());
+      }
+
       monitors_.push_back(insn_idx);
     } else {
-      verifier->Fail(VERIFY_ERROR_BAD_CLASS_HARD) << "unexpected monitor-enter on register v" <<
-          reg_idx;
+      verifier->Fail(VERIFY_ERROR_LOCKING);
+      if (kDumpLockFailures) {
+        LOG(WARNING) << "unexpected monitor-enter on register v" <<  reg_idx << " in "
+                     << PrettyMethod(verifier->GetMethodReference().dex_method_index,
+                                     *verifier->GetMethodReference().dex_file);
+      }
     }
   }
 }
@@ -352,21 +377,64 @@ void RegisterLine::PopMonitor(MethodVerifier* verifier, uint32_t reg_idx) {
   if (!reg_type.IsReferenceTypes()) {
     verifier->Fail(VERIFY_ERROR_BAD_CLASS_HARD) << "monitor-exit on non-object (" << reg_type << ")";
   } else if (monitors_.empty()) {
-    verifier->Fail(VERIFY_ERROR_BAD_CLASS_HARD) << "monitor-exit stack underflow";
+    verifier->Fail(VERIFY_ERROR_LOCKING);
+    if (kDumpLockFailures) {
+      LOG(WARNING) << "monitor-exit stack underflow while verifying "
+                   << PrettyMethod(verifier->GetMethodReference().dex_method_index,
+                                   *verifier->GetMethodReference().dex_file);
+    }
   } else {
     monitors_.pop_back();
-    if (!IsSetLockDepth(reg_idx, monitors_.size())) {
-      // Bug 3215458: Locks and unlocks are on objects, if that object is a literal then before
-      // format "036" the constant collector may create unlocks on the same object but referenced
-      // via different registers.
-      ((verifier->DexFileVersion() >= 36) ? verifier->Fail(VERIFY_ERROR_BAD_CLASS_SOFT)
-                                          : verifier->LogVerifyInfo())
-            << "monitor-exit not unlocking the top of the monitor stack";
+
+    bool success = IsSetLockDepth(reg_idx, monitors_.size());
+
+    if (!success && reg_type.IsZero()) {
+      // Null literals can establish aliases that we can't easily track. As such, handle the zero
+      // case as the 2^32-1 register (which isn't available in dex bytecode).
+      success = IsSetLockDepth(kVirtualNullRegister, monitors_.size());
+      if (success) {
+        reg_idx = kVirtualNullRegister;
+      }
+    }
+
+    if (!success) {
+      verifier->Fail(VERIFY_ERROR_LOCKING);
+      if (kDumpLockFailures) {
+        LOG(WARNING) << "monitor-exit not unlocking the top of the monitor stack while verifying "
+                     << PrettyMethod(verifier->GetMethodReference().dex_method_index,
+                                     *verifier->GetMethodReference().dex_file);
+      }
     } else {
-      // Record the register was unlocked
+      // Record the register was unlocked. This clears all aliases, thus it will also clear the
+      // null lock, if necessary.
       ClearRegToLockDepth(reg_idx, monitors_.size());
     }
   }
+}
+
+bool FindLockAliasedRegister(uint32_t src,
+                             const RegisterLine::RegToLockDepthsMap& src_map,
+                             const RegisterLine::RegToLockDepthsMap& search_map) {
+  auto it = src_map.find(src);
+  if (it == src_map.end()) {
+    // "Not locked" is trivially aliased.
+    return true;
+  }
+  uint32_t src_lock_levels = it->second;
+  if (src_lock_levels == 0) {
+    // "Not locked" is trivially aliased.
+    return true;
+  }
+
+  // Scan the map for the same value.
+  for (const std::pair<uint32_t, uint32_t>& pair : search_map) {
+    if (pair.first != src && pair.second == src_lock_levels) {
+      return true;
+    }
+  }
+
+  // Nothing found, no alias.
+  return false;
 }
 
 bool RegisterLine::MergeRegisters(MethodVerifier* verifier, const RegisterLine* incoming_line) {
@@ -383,24 +451,101 @@ bool RegisterLine::MergeRegisters(MethodVerifier* verifier, const RegisterLine* 
   }
   if (monitors_.size() > 0 || incoming_line->monitors_.size() > 0) {
     if (monitors_.size() != incoming_line->monitors_.size()) {
-      LOG(WARNING) << "mismatched stack depths (depth=" << MonitorStackDepth()
-                     << ", incoming depth=" << incoming_line->MonitorStackDepth() << ")";
+      verifier->Fail(VERIFY_ERROR_LOCKING);
+      if (kDumpLockFailures) {
+        LOG(WARNING) << "mismatched stack depths (depth=" << MonitorStackDepth()
+                     << ", incoming depth=" << incoming_line->MonitorStackDepth() << ") in "
+                     << PrettyMethod(verifier->GetMethodReference().dex_method_index,
+                                     *verifier->GetMethodReference().dex_file);
+      }
     } else if (reg_to_lock_depths_ != incoming_line->reg_to_lock_depths_) {
       for (uint32_t idx = 0; idx < num_regs_; idx++) {
         size_t depths = reg_to_lock_depths_.count(idx);
         size_t incoming_depths = incoming_line->reg_to_lock_depths_.count(idx);
         if (depths != incoming_depths) {
-          if (depths == 0 || incoming_depths == 0) {
-            reg_to_lock_depths_.erase(idx);
-          } else {
-            LOG(WARNING) << "mismatched stack depths for register v" << idx
-                << ": " << depths  << " != " << incoming_depths;
+          // Stack levels aren't matching. This is potentially bad, as we don't do a
+          // flow-sensitive analysis.
+          // However, this could be an alias of something locked in one path, and the alias was
+          // destroyed in another path. It is fine to drop this as long as there's another alias
+          // for the lock around. The last vanishing alias will then report that things would be
+          // left unlocked. We need to check for aliases for both lock levels.
+          //
+          // Example (lock status in curly braces as pair of register and lock leels):
+          //
+          //                            lock v1 {v1=1}
+          //                        |                    |
+          //              v0 = v1 {v0=1, v1=1}       v0 = v2 {v1=1}
+          //                        |                    |
+          //                                 {v1=1}
+          //                                         // Dropping v0, as the status can't be merged
+          //                                         // but the lock info ("locked at depth 1" and)
+          //                                         // "not locked at all") is available.
+          if (!FindLockAliasedRegister(idx,
+                                       reg_to_lock_depths_,
+                                       reg_to_lock_depths_) ||
+              !FindLockAliasedRegister(idx,
+                                       incoming_line->reg_to_lock_depths_,
+                                       reg_to_lock_depths_)) {
+            verifier->Fail(VERIFY_ERROR_LOCKING);
+            if (kDumpLockFailures) {
+              LOG(WARNING) << "mismatched stack depths for register v" << idx
+                           << ": " << depths  << " != " << incoming_depths << " in "
+                           << PrettyMethod(verifier->GetMethodReference().dex_method_index,
+                                           *verifier->GetMethodReference().dex_file);
+            }
             break;
+          }
+          // We found aliases, set this to zero.
+          reg_to_lock_depths_.erase(idx);
+        } else if (depths > 0) {
+          // Check whether they're actually the same levels.
+          uint32_t locked_levels = reg_to_lock_depths_.find(idx)->second;
+          uint32_t incoming_locked_levels = incoming_line->reg_to_lock_depths_.find(idx)->second;
+          if (locked_levels != incoming_locked_levels) {
+            // Lock levels aren't matching. This is potentially bad, as we don't do a
+            // flow-sensitive analysis.
+            // However, this could be an alias of something locked in one path, and the alias was
+            // destroyed in another path. It is fine to drop this as long as there's another alias
+            // for the lock around. The last vanishing alias will then report that things would be
+            // left unlocked. We need to check for aliases for both lock levels.
+            //
+            // Example (lock status in curly braces as pair of register and lock leels):
+            //
+            //                          lock v1 {v1=1}
+            //                          lock v2 {v1=1, v2=2}
+            //                        |                      |
+            //         v0 = v1 {v0=1, v1=1, v2=2}  v0 = v2 {v0=2, v1=1, v2=2}
+            //                        |                      |
+            //                             {v1=1, v2=2}
+            //                                           // Dropping v0, as the status can't be
+            //                                           // merged but the lock info ("locked at
+            //                                           // depth 1" and "locked at depth 2") is
+            //                                           // available.
+            if (!FindLockAliasedRegister(idx,
+                                         reg_to_lock_depths_,
+                                         reg_to_lock_depths_) ||
+                !FindLockAliasedRegister(idx,
+                                         incoming_line->reg_to_lock_depths_,
+                                         reg_to_lock_depths_)) {
+              // No aliases for both current and incoming, we'll lose information.
+              verifier->Fail(VERIFY_ERROR_LOCKING);
+              if (kDumpLockFailures) {
+                LOG(WARNING) << "mismatched lock levels for register v" << idx << ": "
+                    << std::hex << locked_levels << std::dec  << " != "
+                    << std::hex << incoming_locked_levels << std::dec << " in "
+                    << PrettyMethod(verifier->GetMethodReference().dex_method_index,
+                                    *verifier->GetMethodReference().dex_file);
+              }
+              break;
+            }
+            // We found aliases, set this to zero.
+            reg_to_lock_depths_.erase(idx);
           }
         }
       }
     }
   }
+
   // Check whether "this" was initialized in both paths.
   if (this_initialized_ && !incoming_line->this_initialized_) {
     this_initialized_ = false;

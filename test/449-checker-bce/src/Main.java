@@ -1,36 +1,36 @@
 /*
-* Copyright (C) 2015 The Android Open Source Project
-*
-* Licensed under the Apache License, Version 2.0 (the "License");
-* you may not use this file except in compliance with the License.
-* You may obtain a copy of the License at
-*
-*      http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing, software
-* distributed under the License is distributed on an "AS IS" BASIS,
-* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
-* limitations under the License.
-*/
+ * Copyright (C) 2015 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 public class Main {
 
-  // CHECK-START: int Main.sieve(int) BCE (before)
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK: BoundsCheck
-  // CHECK: ArrayGet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
+  /// CHECK-START: int Main.sieve(int) BCE (before)
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArrayGet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
 
-  // CHECK-START: int Main.sieve(int) BCE (after)
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArrayGet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
+  /// CHECK-START: int Main.sieve(int) BCE (after)
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArrayGet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
 
   static int sieve(int size) {
     int primeCount = 0;
@@ -47,25 +47,25 @@ public class Main {
   }
 
 
-  // CHECK-START: void Main.narrow(int[], int) BCE (before)
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
+  /// CHECK-START: void Main.narrow(int[], int) BCE (before)
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
 
-  // CHECK-START: void Main.narrow(int[], int) BCE (after)
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
+  /// CHECK-START: void Main.narrow(int[], int) BCE (after)
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
 
   static void narrow(int[] array, int offset) {
     if (offset < 0) {
@@ -108,18 +108,18 @@ public class Main {
   }
 
 
-  // CHECK-START: void Main.constantIndexing1(int[]) BCE (before)
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
+  /// CHECK-START: void Main.constantIndexing1(int[]) BCE (before)
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
 
-  // CHECK-START: void Main.constantIndexing1(int[]) BCE (after)
-  // CHECK-NOT: Deoptimize
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArraySet
+  /// CHECK-START: void Main.constantIndexing1(int[]) BCE (after)
+  /// CHECK-NOT: Deoptimize
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArraySet
 
   static void constantIndexing1(int[] array) {
     array[5] = 1;
@@ -127,29 +127,29 @@ public class Main {
   }
 
 
-  // CHECK-START: void Main.constantIndexing2(int[]) BCE (before)
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
+  /// CHECK-START: void Main.constantIndexing2(int[]) BCE (before)
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
 
-  // CHECK-START: void Main.constantIndexing2(int[]) BCE (after)
-  // CHECK: LessThanOrEqual
-  // CHECK: Deoptimize
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
+  /// CHECK-START: void Main.constantIndexing2(int[]) BCE (after)
+  /// CHECK: LessThanOrEqual
+  /// CHECK: Deoptimize
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
 
   static void constantIndexing2(int[] array) {
     array[1] = 1;
@@ -160,45 +160,45 @@ public class Main {
   }
 
 
-  // CHECK-START: int[] Main.constantIndexing3(int[], int[], boolean) BCE (before)
-  // CHECK: BoundsCheck
-  // CHECK: ArrayGet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK: BoundsCheck
-  // CHECK: ArrayGet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK: BoundsCheck
-  // CHECK: ArrayGet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK: BoundsCheck
-  // CHECK: ArrayGet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
+  /// CHECK-START: int[] Main.constantIndexing3(int[], int[], boolean) BCE (before)
+  /// CHECK: BoundsCheck
+  /// CHECK: ArrayGet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArrayGet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArrayGet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArrayGet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
 
-  // CHECK-START: int[] Main.constantIndexing3(int[], int[], boolean) BCE (after)
-  // CHECK: LessThanOrEqual
-  // CHECK: Deoptimize
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArrayGet
-  // CHECK: LessThanOrEqual
-  // CHECK: Deoptimize
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArrayGet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArrayGet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArrayGet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArraySet
+  /// CHECK-START: int[] Main.constantIndexing3(int[], int[], boolean) BCE (after)
+  /// CHECK: LessThanOrEqual
+  /// CHECK: Deoptimize
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArrayGet
+  /// CHECK: LessThanOrEqual
+  /// CHECK: Deoptimize
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArrayGet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArrayGet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArrayGet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArraySet
 
   static int[] constantIndexing3(int[] array1, int[] array2, boolean copy) {
     if (!copy) {
@@ -212,14 +212,14 @@ public class Main {
   }
 
 
-  // CHECK-START: void Main.constantIndexing4(int[]) BCE (before)
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
+  /// CHECK-START: void Main.constantIndexing4(int[]) BCE (before)
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
 
-  // CHECK-START: void Main.constantIndexing4(int[]) BCE (after)
-  // CHECK-NOT: LessThanOrEqual
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
+  /// CHECK-START: void Main.constantIndexing4(int[]) BCE (after)
+  /// CHECK-NOT: LessThanOrEqual
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
 
   // There is only one array access. It's not beneficial
   // to create a compare with deoptimization instruction.
@@ -228,18 +228,18 @@ public class Main {
   }
 
 
-  // CHECK-START: void Main.constantIndexing5(int[]) BCE (before)
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
+  /// CHECK-START: void Main.constantIndexing5(int[]) BCE (before)
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
 
-  // CHECK-START: void Main.constantIndexing5(int[]) BCE (after)
-  // CHECK-NOT: Deoptimize
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
+  /// CHECK-START: void Main.constantIndexing5(int[]) BCE (after)
+  /// CHECK-NOT: Deoptimize
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
 
   static void constantIndexing5(int[] array) {
     // We don't apply the deoptimization for very large constant index
@@ -249,37 +249,57 @@ public class Main {
     array[Integer.MAX_VALUE - 998] = 1;
   }
 
-  // CHECK-START: void Main.loopPattern1(int[]) BCE (before)
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
+  /// CHECK-START: void Main.constantIndexing6(int[]) BCE (before)
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
 
-  // CHECK-START: void Main.loopPattern1(int[]) BCE (after)
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArraySet
+  /// CHECK-START: void Main.constantIndexing6(int[]) BCE (after)
+  /// CHECK: Deoptimize
+
+  static void constantIndexing6(int[] array) {
+    array[3] = 1;
+    array[4] = 1;
+  }
+
+  // A helper into which the actual throwing function should be inlined.
+  static void constantIndexingForward6(int[] array) {
+    assertIsManaged();
+    constantIndexing6(array);
+  }
+
+  /// CHECK-START: void Main.loopPattern1(int[]) BCE (before)
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+
+  /// CHECK-START: void Main.loopPattern1(int[]) BCE (after)
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArraySet
 
   static void loopPattern1(int[] array) {
     for (int i = 0; i < array.length; i++) {
@@ -316,33 +336,33 @@ public class Main {
   }
 
 
-  // CHECK-START: void Main.loopPattern2(int[]) BCE (before)
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
+  /// CHECK-START: void Main.loopPattern2(int[]) BCE (before)
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
 
-  // CHECK-START: void Main.loopPattern2(int[]) BCE (after)
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArraySet
+  /// CHECK-START: void Main.loopPattern2(int[]) BCE (after)
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArraySet
 
   static void loopPattern2(int[] array) {
     for (int i = array.length - 1; i >= 0; i--) {
@@ -372,13 +392,13 @@ public class Main {
   }
 
 
-  // CHECK-START: void Main.loopPattern3(int[]) BCE (before)
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
+  /// CHECK-START: void Main.loopPattern3(int[]) BCE (before)
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
 
-  // CHECK-START: void Main.loopPattern3(int[]) BCE (after)
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
+  /// CHECK-START: void Main.loopPattern3(int[]) BCE (after)
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
 
   static void loopPattern3(int[] array) {
     java.util.Random random = new java.util.Random();
@@ -393,29 +413,29 @@ public class Main {
   }
 
 
-  // CHECK-START: void Main.constantNewArray() BCE (before)
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
+  /// CHECK-START: void Main.constantNewArray() BCE (before)
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
 
-  // CHECK-START: void Main.constantNewArray() BCE (after)
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
+  /// CHECK-START: void Main.constantNewArray() BCE (after)
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
 
   static void constantNewArray() {
     int[] array = new int[10];
@@ -437,13 +457,13 @@ public class Main {
     return 1;
   }
 
-  // CHECK-START: void Main.circularBufferProducer() BCE (before)
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
+  /// CHECK-START: void Main.circularBufferProducer() BCE (before)
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
 
-  // CHECK-START: void Main.circularBufferProducer() BCE (after)
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArraySet
+  /// CHECK-START: void Main.circularBufferProducer() BCE (after)
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArraySet
 
   static void circularBufferProducer() {
     byte[] array = new byte[4096];
@@ -455,17 +475,17 @@ public class Main {
   }
 
 
-  // CHECK-START: void Main.pyramid1(int[]) BCE (before)
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
+  /// CHECK-START: void Main.pyramid1(int[]) BCE (before)
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
 
-  // CHECK-START: void Main.pyramid1(int[]) BCE (after)
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArraySet
+  /// CHECK-START: void Main.pyramid1(int[]) BCE (after)
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArraySet
 
   // Set array to something like {0, 1, 2, 3, 2, 1, 0}.
   static void pyramid1(int[] array) {
@@ -476,17 +496,17 @@ public class Main {
   }
 
 
-  // CHECK-START: void Main.pyramid2(int[]) BCE (before)
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
+  /// CHECK-START: void Main.pyramid2(int[]) BCE (before)
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
 
-  // CHECK-START: void Main.pyramid2(int[]) BCE (after)
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArraySet
+  /// CHECK-START: void Main.pyramid2(int[]) BCE (after)
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArraySet
 
   // Set array to something like {0, 1, 2, 3, 2, 1, 0}.
   static void pyramid2(int[] array) {
@@ -497,17 +517,17 @@ public class Main {
   }
 
 
-  // CHECK-START: void Main.pyramid3(int[]) BCE (before)
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
+  /// CHECK-START: void Main.pyramid3(int[]) BCE (before)
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
 
-  // CHECK-START: void Main.pyramid3(int[]) BCE (after)
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArraySet
+  /// CHECK-START: void Main.pyramid3(int[]) BCE (after)
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArraySet
 
   // Set array to something like {0, 1, 2, 3, 2, 1, 0}.
   static void pyramid3(int[] array) {
@@ -518,17 +538,17 @@ public class Main {
   }
 
 
-  // CHECK-START: boolean Main.isPyramid(int[]) BCE (before)
-  // CHECK: BoundsCheck
-  // CHECK: ArrayGet
-  // CHECK: BoundsCheck
-  // CHECK: ArrayGet
+  /// CHECK-START: boolean Main.isPyramid(int[]) BCE (before)
+  /// CHECK: BoundsCheck
+  /// CHECK: ArrayGet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArrayGet
 
-  // CHECK-START: boolean Main.isPyramid(int[]) BCE (after)
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArrayGet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArrayGet
+  /// CHECK-START: boolean Main.isPyramid(int[]) BCE (after)
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArrayGet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArrayGet
 
   static boolean isPyramid(int[] array) {
     int i = 0;
@@ -546,43 +566,43 @@ public class Main {
   }
 
 
-  // CHECK-START: void Main.bubbleSort(int[]) GVN (before)
-  // CHECK: BoundsCheck
-  // CHECK: ArrayGet
-  // CHECK: BoundsCheck
-  // CHECK: ArrayGet
-  // CHECK: BoundsCheck
-  // CHECK: ArrayGet
-  // CHECK: BoundsCheck
-  // CHECK: ArrayGet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
+  /// CHECK-START: void Main.bubbleSort(int[]) GVN (before)
+  /// CHECK: BoundsCheck
+  /// CHECK: ArrayGet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArrayGet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArrayGet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArrayGet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
 
-  // CHECK-START: void Main.bubbleSort(int[]) GVN (after)
-  // CHECK: BoundsCheck
-  // CHECK: ArrayGet
-  // CHECK: BoundsCheck
-  // CHECK: ArrayGet
-  // CHECK-NOT: ArrayGet
-  // CHECK-NOT: ArrayGet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArraySet
+  /// CHECK-START: void Main.bubbleSort(int[]) GVN (after)
+  /// CHECK: BoundsCheck
+  /// CHECK: ArrayGet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArrayGet
+  /// CHECK-NOT: ArrayGet
+  /// CHECK-NOT: ArrayGet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArraySet
 
-  // CHECK-START: void Main.bubbleSort(int[]) BCE (after)
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArrayGet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArrayGet
-  // CHECK-NOT: ArrayGet
-  // CHECK-NOT: ArrayGet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArraySet
+  /// CHECK-START: void Main.bubbleSort(int[]) BCE (after)
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArrayGet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArrayGet
+  /// CHECK-NOT: ArrayGet
+  /// CHECK-NOT: ArrayGet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArraySet
 
   static void bubbleSort(int[] array) {
     for (int i = 0; i < array.length - 1; i++) {
@@ -599,10 +619,20 @@ public class Main {
 
   static int foo() {
     try {
+      assertIsManaged();
       // This will cause AIOOBE.
       constantIndexing2(new int[3]);
     } catch (ArrayIndexOutOfBoundsException e) {
-      return 99;
+      assertIsManaged();  // This is to ensure that single-frame deoptimization works.
+                          // Will need to be updated if constantIndexing2 is inlined.
+      try {
+        // This will cause AIOOBE.
+        constantIndexingForward6(new int[3]);
+      } catch (ArrayIndexOutOfBoundsException e2) {
+        // Having deopted, we expect to be running interpreted at this point.
+        // Does not apply to debuggable, however, since we do not inline.
+        return 99;
+      }
     }
     return 0;
   }
@@ -610,180 +640,207 @@ public class Main {
 
   int sum;
 
-  // CHECK-START: void Main.foo1(int[], int, int) BCE (before)
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArrayGet
+  /// CHECK-START: void Main.foo1(int[], int, int, boolean) BCE (before)
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArrayGet
 
-  // CHECK-START: void Main.foo1(int[], int, int) BCE (after)
-  // CHECK: Phi
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArrayGet
-  //  Added blocks for deoptimization.
-  // CHECK: If
-  // CHECK: Goto
-  // CHECK: Deoptimize
-  // CHECK: Deoptimize
-  // CHECK: Deoptimize
-  // CHECK-NOT: Deoptimize
-  // CHECK: Goto
-  // CHECK: Phi
-  // CHECK: Goto
+  /// CHECK-START: void Main.foo1(int[], int, int, boolean) BCE (after)
+  /// CHECK: Phi
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArrayGet
+  //  Added blocks at end for deoptimization.
+  /// CHECK: Exit
+  /// CHECK: If
+  /// CHECK: Deoptimize
+  /// CHECK: Deoptimize
+  /// CHECK: Deoptimize
+  /// CHECK-NOT: Deoptimize
+  /// CHECK: Goto
+  /// CHECK: Goto
+  /// CHECK: Goto
 
-  void foo1(int[] array, int start, int end) {
-    // Three HDeoptimize will be added. One for
-    // start >= 0, one for end <= array.length,
+  void foo1(int[] array, int start, int end, boolean expectInterpreter) {
+    // Three HDeoptimize will be added. Two for the index
     // and one for null check on array (to hoist null
     // check and array.length out of loop).
     for (int i = start ; i < end; i++) {
+      if (expectInterpreter) {
+        assertIsInterpreted();
+      } else {
+        assertIsManaged();
+      }
       array[i] = 1;
       sum += array[i];
     }
   }
 
 
-  // CHECK-START: void Main.foo2(int[], int, int) BCE (before)
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArrayGet
+  /// CHECK-START: void Main.foo2(int[], int, int, boolean) BCE (before)
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArrayGet
+  /// CHECK-START: void Main.foo2(int[], int, int, boolean) BCE (after)
+  /// CHECK: Phi
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArrayGet
+  //  Added blocks at end for deoptimization.
+  /// CHECK: Exit
+  /// CHECK: If
+  /// CHECK: Deoptimize
+  /// CHECK: Deoptimize
+  /// CHECK: Deoptimize
+  /// CHECK-NOT: Deoptimize
+  /// CHECK: Goto
+  /// CHECK: Goto
+  /// CHECK: Goto
 
-  // CHECK-START: void Main.foo2(int[], int, int) BCE (after)
-  // CHECK: Phi
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArrayGet
-  //  Added blocks for deoptimization.
-  // CHECK: If
-  // CHECK: Goto
-  // CHECK: Deoptimize
-  // CHECK: Deoptimize
-  // CHECK: Deoptimize
-  // CHECK-NOT: Deoptimize
-  // CHECK: Goto
-  // CHECK: Phi
-  // CHECK: Goto
-
-  void foo2(int[] array, int start, int end) {
-    // Three HDeoptimize will be added. One for
-    // start >= 0, one for end <= array.length,
+  void foo2(int[] array, int start, int end, boolean expectInterpreter) {
+    // Three HDeoptimize will be added. Two for the index
     // and one for null check on array (to hoist null
     // check and array.length out of loop).
     for (int i = start ; i <= end; i++) {
+      if (expectInterpreter) {
+        assertIsInterpreted();
+      } else {
+        assertIsManaged();
+      }
       array[i] = 1;
       sum += array[i];
     }
   }
 
 
-  // CHECK-START: void Main.foo3(int[], int) BCE (before)
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArrayGet
+  /// CHECK-START: void Main.foo3(int[], int, boolean) BCE (before)
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArrayGet
+  /// CHECK-START: void Main.foo3(int[], int, boolean) BCE (after)
+  /// CHECK: Phi
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArrayGet
+  //  Added blocks at end for deoptimization.
+  /// CHECK: Exit
+  /// CHECK: If
+  /// CHECK: Deoptimize
+  /// CHECK: Deoptimize
+  /// CHECK: Deoptimize
+  /// CHECK-NOT: Deoptimize
+  /// CHECK: Goto
+  /// CHECK: Goto
+  /// CHECK: Goto
 
-  // CHECK-START: void Main.foo3(int[], int) BCE (after)
-  // CHECK: Phi
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArrayGet
-  //  Added blocks for deoptimization.
-  // CHECK: If
-  // CHECK: Goto
-  // CHECK: Deoptimize
-  // CHECK: Deoptimize
-  // CHECK-NOT: Deoptimize
-  // CHECK: Goto
-  // CHECK: Phi
-  // CHECK: Goto
-
-  void foo3(int[] array, int end) {
-    // Two HDeoptimize will be added. One for end < array.length,
+  void foo3(int[] array, int end, boolean expectInterpreter) {
+    // Three HDeoptimize will be added. Two for the index
     // and one for null check on array (to hoist null check
     // and array.length out of loop).
     for (int i = 3 ; i <= end; i++) {
+      if (expectInterpreter) {
+        assertIsInterpreted();
+      } else {
+        assertIsManaged();
+      }
       array[i] = 1;
       sum += array[i];
     }
   }
 
 
-  // CHECK-START: void Main.foo4(int[], int) BCE (before)
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArrayGet
+  /// CHECK-START: void Main.foo4(int[], int, boolean) BCE (before)
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArrayGet
 
-  // CHECK-START: void Main.foo4(int[], int) BCE (after)
-  // CHECK: Phi
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArrayGet
-  //  Added blocks for deoptimization.
-  // CHECK: If
-  // CHECK: Goto
-  // CHECK: Deoptimize
-  // CHECK: Deoptimize
-  // CHECK-NOT: Deoptimize
-  // CHECK: Goto
-  // CHECK: Phi
-  // CHECK: Goto
+  /// CHECK-START: void Main.foo4(int[], int, boolean) BCE (after)
+  /// CHECK: Phi
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArrayGet
+  //  Added blocks at end for deoptimization.
+  /// CHECK: Exit
+  /// CHECK: If
+  /// CHECK: Deoptimize
+  /// CHECK: Deoptimize
+  /// CHECK: Deoptimize
+  /// CHECK-NOT: Deoptimize
+  /// CHECK: Goto
+  /// CHECK: Goto
+  /// CHECK: Goto
 
-  void foo4(int[] array, int end) {
-    // Two HDeoptimize will be added. One for end <= array.length,
+  void foo4(int[] array, int end, boolean expectInterpreter) {
+    // Three HDeoptimize will be added. Two for the index
     // and one for null check on array (to hoist null check
     // and array.length out of loop).
     for (int i = end ; i > 0; i--) {
+      if (expectInterpreter) {
+        assertIsInterpreted();
+      } else {
+        assertIsManaged();
+      }
       array[i - 1] = 1;
       sum += array[i - 1];
     }
   }
 
 
-  // CHECK-START: void Main.foo5(int[], int) BCE (before)
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK: BoundsCheck
-  // CHECK: ArrayGet
-  // CHECK: BoundsCheck
-  // CHECK: ArrayGet
-  // CHECK: BoundsCheck
-  // CHECK: ArrayGet
+  /// CHECK-START: void Main.foo5(int[], int, boolean) BCE (before)
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArrayGet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArrayGet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArrayGet
 
-  // CHECK-START: void Main.foo5(int[], int) BCE (after)
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArraySet
-  // CHECK: Phi
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArrayGet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArrayGet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArrayGet
-  //  Added blocks for deoptimization.
-  // CHECK: If
-  // CHECK: Goto
-  // CHECK: Deoptimize
-  // CHECK-NOT: Deoptimize
-  // CHECK: Goto
-  //  array.length is defined before the loop header so no phi is needed.
-  // CHECK-NOT: Phi
-  // CHECK: Goto
+  /// CHECK-START: void Main.foo5(int[], int, boolean) BCE (after)
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK: Phi
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArrayGet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArrayGet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArrayGet
+  //  Added blocks at end for deoptimization.
+  /// CHECK: Exit
+  /// CHECK: If
+  /// CHECK: Deoptimize
+  /// CHECK: Deoptimize
+  /// CHECK: Deoptimize
+  /// CHECK: Deoptimize
+  /// CHECK: Deoptimize
+  /// CHECK: Deoptimize
+  /// CHECK-NOT: Deoptimize
+  /// CHECK: Goto
+  /// CHECK: Goto
+  /// CHECK: Goto
 
-  void foo5(int[] array, int end) {
+  void foo5(int[] array, int end, boolean expectInterpreter) {
     // Bounds check in this loop can be eliminated without deoptimization.
     for (int i = array.length - 1 ; i >= 0; i--) {
       array[i] = 1;
     }
-    // One HDeoptimize will be added.
-    // It's for (end - 2 <= array.length - 2).
+    // Several HDeoptimize will be added. Two for each index.
+    // The null check is not necessary.
     for (int i = end - 2 ; i > 0; i--) {
+      if (expectInterpreter) {
+        assertIsInterpreted();
+      } else {
+        assertIsManaged();
+      }
       sum += array[i - 1];
       sum += array[i];
       sum += array[i + 1];
@@ -791,83 +848,90 @@ public class Main {
   }
 
 
-  // CHECK-START: void Main.foo6(int[], int, int) BCE (before)
-  // CHECK: BoundsCheck
-  // CHECK: ArrayGet
-  // CHECK: BoundsCheck
-  // CHECK: ArrayGet
-  // CHECK: BoundsCheck
-  // CHECK: ArrayGet
-  // CHECK: BoundsCheck
-  // CHECK: ArrayGet
-  // CHECK: BoundsCheck
-  // CHECK: ArrayGet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArraySet
+  /// CHECK-START: void Main.foo6(int[], int, int, boolean) BCE (before)
+  /// CHECK: BoundsCheck
+  /// CHECK: ArrayGet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArrayGet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArrayGet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArrayGet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArrayGet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArraySet
+  /// CHECK-START: void Main.foo6(int[], int, int, boolean) BCE (after)
+  /// CHECK: Phi
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArrayGet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArrayGet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArrayGet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArrayGet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArrayGet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArraySet
+  //  Added blocks at end for deoptimization.
+  /// CHECK: Exit
+  /// CHECK: If
+  /// CHECK: Deoptimize
+  /// CHECK: Deoptimize
+  /// CHECK: Deoptimize
+  /// CHECK: Deoptimize
+  /// CHECK: Deoptimize
+  /// CHECK: Deoptimize
+  /// CHECK: Deoptimize
+  /// CHECK: Deoptimize
+  /// CHECK: Deoptimize
+  /// CHECK: Deoptimize
+  /// CHECK: Deoptimize
+  /// CHECK-NOT: Deoptimize
+  /// CHECK: Goto
+  /// CHECK: Goto
+  /// CHECK: Goto
 
-  // CHECK-START: void Main.foo6(int[], int, int) BCE (after)
-  // CHECK: Phi
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArrayGet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArrayGet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArrayGet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArrayGet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArrayGet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArraySet
-  //  Added blocks for deoptimization.
-  // CHECK: If
-  // CHECK: Goto
-  // CHECK: Deoptimize
-  // CHECK: Deoptimize
-  // CHECK: Deoptimize
-  // CHECK-NOT: Deoptimize
-  // CHECK: Goto
-  // CHECK: Phi
-  // CHECK: Goto
-  // CHECK-NOT: Deoptimize
-
-  void foo6(int[] array, int start, int end) {
-    // Three HDeoptimize will be added. One for
-    // start >= 2, one for end <= array.length - 3,
-    // and one for null check on array (to hoist null
-    // check and array.length out of loop).
+  void foo6(int[] array, int start, int end, boolean expectInterpreter) {
+    // Several HDeoptimize will be added.
     for (int i = end; i >= start; i--) {
+      if (expectInterpreter) {
+        assertIsInterpreted();
+      } else {
+        assertIsManaged();
+      }
       array[i] = (array[i-2] + array[i-1] + array[i] + array[i+1] + array[i+2]) / 5;
     }
   }
 
 
-  // CHECK-START: void Main.foo7(int[], int, int, boolean) BCE (before)
-  // CHECK: BoundsCheck
-  // CHECK: ArrayGet
-  // CHECK: BoundsCheck
-  // CHECK: ArrayGet
+  /// CHECK-START: void Main.foo7(int[], int, int, boolean) BCE (before)
+  /// CHECK: BoundsCheck
+  /// CHECK: ArrayGet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArrayGet
 
-  // CHECK-START: void Main.foo7(int[], int, int, boolean) BCE (after)
-  // CHECK: Phi
-  // CHECK: BoundsCheck
-  // CHECK: ArrayGet
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArrayGet
-  //  Added blocks for deoptimization.
-  // CHECK: If
-  // CHECK: Goto
-  // CHECK: Deoptimize
-  // CHECK: Deoptimize
-  // CHECK: Deoptimize
-  // CHECK-NOT: Deoptimize
-  // CHECK: Goto
-  // CHECK: Phi
-  // CHECK: Goto
+  /// CHECK-START: void Main.foo7(int[], int, int, boolean) BCE (after)
+  /// CHECK: Phi
+  /// CHECK: BoundsCheck
+  /// CHECK: ArrayGet
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArrayGet
+  //  Added blocks at end for deoptimization.
+  /// CHECK: Exit
+  /// CHECK: If
+  /// CHECK: Deoptimize
+  /// CHECK: Deoptimize
+  /// CHECK: Deoptimize
+  /// CHECK-NOT: Deoptimize
+  /// CHECK: Goto
+  /// CHECK: Goto
+  /// CHECK: Goto
 
   void foo7(int[] array, int start, int end, boolean lowEnd) {
-    // Three HDeoptimize will be added. One for
-    // start >= 0, one for end <= array.length,
+    // Three HDeoptimize will be added. One for the index
     // and one for null check on array (to hoist null
     // check and array.length out of loop).
     for (int i = start ; i < end; i++) {
@@ -882,39 +946,41 @@ public class Main {
   }
 
 
-  // CHECK-START: void Main.foo8(int[][], int, int) BCE (before)
-  // CHECK: BoundsCheck
-  // CHECK: ArrayGet
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
+  /// CHECK-START: void Main.foo8(int[][], int, int) BCE (before)
+  /// CHECK: BoundsCheck
+  /// CHECK: ArrayGet
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
 
-  // CHECK-START: void Main.foo8(int[][], int, int) BCE (after)
-  // CHECK: Phi
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArrayGet
-  // CHECK: Phi
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArraySet
-  //  Added blocks for deoptimization.
-  // CHECK: If
-  // CHECK: Goto
-  // CHECK: Deoptimize
-  // CHECK: Deoptimize
-  // CHECK: Deoptimize
-  // CHECK: Deoptimize
-  // CHECK: Deoptimize
-  // CHECK: Deoptimize
-  // CHECK-NOT: Deoptimize
-  // CHECK: Goto
-  // CHECK: Phi
-  // CHECK: Goto
+  /// CHECK-START: void Main.foo8(int[][], int, int) BCE (after)
+  /// CHECK: Phi
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArrayGet
+  /// CHECK: Phi
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArraySet
+  //  Added blocks at end for deoptimization.
+  /// CHECK: Exit
+  /// CHECK: If
+  /// CHECK: Deoptimize
+  /// CHECK: Deoptimize
+  /// CHECK: Deoptimize
+  /// CHECK: Goto
+  /// CHECK: Goto
+  /// CHECK: Goto
+  /// CHECK: If
+  /// CHECK: Deoptimize
+  /// CHECK: Deoptimize
+  /// CHECK: Deoptimize
+  /// CHECK-NOT: Deoptimize
+  /// CHECK: Goto
+  /// CHECK: Goto
+  /// CHECK: Goto
 
   void foo8(int[][] matrix, int start, int end) {
-    // Three HDeoptimize will be added for the outer loop.
-    // start >= 0, end <= matrix.length, and null check on matrix.
-    // Three HDeoptimize will be added for the inner loop
-    // start >= 0 (TODO: this may be optimized away),
-    // end <= row.length, and null check on row.
+    // Three HDeoptimize will be added for the outer loop,
+    // two for the index, and null check on matrix. Same
+    // for the inner loop.
     for (int i = start; i < end; i++) {
       int[] row = matrix[i];
       for (int j = start; j < end; j++) {
@@ -924,39 +990,51 @@ public class Main {
   }
 
 
-  // CHECK-START: void Main.foo9(int[]) BCE (before)
-  // CHECK: NullCheck
-  // CHECK: BoundsCheck
-  // CHECK: ArrayGet
+  /// CHECK-START: void Main.foo9(int[], boolean) BCE (before)
+  /// CHECK: NullCheck
+  /// CHECK: BoundsCheck
+  /// CHECK: ArrayGet
 
-  // CHECK-START: void Main.foo9(int[]) BCE (after)
+  /// CHECK-START: void Main.foo9(int[], boolean) BCE (after)
   //  The loop is guaranteed to be entered. No need to transform the
   //  loop for loop body entry test.
-  // CHECK: Deoptimize
-  // CHECK: Deoptimize
-  // CHECK-NOT: Deoptimize
-  // CHECK: Phi
-  // CHECK-NOT: NullCheck
-  // CHECK-NOT: BoundsCheck
-  // CHECK: ArrayGet
+  /// CHECK: Deoptimize
+  /// CHECK: Deoptimize
+  /// CHECK: Deoptimize
+  /// CHECK-NOT: Deoptimize
+  /// CHECK: Phi
+  /// CHECK-NOT: NullCheck
+  /// CHECK-NOT: BoundsCheck
+  /// CHECK: ArrayGet
 
-  void foo9(int[] array) {
-    // Two HDeoptimize will be added. One for
-    // 10 <= array.length, and one for null check on array.
+  /// CHECK-START: void Main.foo9(int[], boolean) instruction_simplifier_after_bce (after)
+  //  Simplification removes the redundant check
+  /// CHECK: Deoptimize
+  /// CHECK: Deoptimize
+  /// CHECK-NOT: Deoptimize
+
+  void foo9(int[] array, boolean expectInterpreter) {
+    // Two HDeoptimize will be added. Two for the index
+    // and one for null check on array.
     for (int i = 0 ; i < 10; i++) {
+      if (expectInterpreter) {
+        assertIsInterpreted();
+      } else {
+        assertIsManaged();
+      }
       sum += array[i];
     }
   }
 
 
-  // CHECK-START: void Main.partialLooping(int[], int, int) BCE (before)
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
+  /// CHECK-START: void Main.partialLooping(int[], int, int) BCE (before)
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
 
-  // CHECK-START: void Main.partialLooping(int[], int, int) BCE (after)
-  // CHECK-NOT: Deoptimize
-  // CHECK: BoundsCheck
-  // CHECK: ArraySet
+  /// CHECK-START: void Main.partialLooping(int[], int, int) BCE (after)
+  /// CHECK-NOT: Deoptimize
+  /// CHECK: BoundsCheck
+  /// CHECK: ArraySet
 
   void partialLooping(int[] array, int start, int end) {
     // This loop doesn't cover the full range of [start, end) so
@@ -975,7 +1053,7 @@ public class Main {
   static void testUnknownBounds() {
     boolean caught = false;
     Main main = new Main();
-    main.foo1(new int[10], 0, 10);
+    main.foo1(new int[10], 0, 10, false);
     if (main.sum != 10) {
       System.out.println("foo1 failed!");
     }
@@ -983,7 +1061,7 @@ public class Main {
     caught = false;
     main = new Main();
     try {
-      main.foo1(new int[10], 0, 11);
+      main.foo1(new int[10], 0, 11, true);
     } catch (ArrayIndexOutOfBoundsException e) {
       caught = true;
     }
@@ -992,7 +1070,7 @@ public class Main {
     }
 
     main = new Main();
-    main.foo2(new int[10], 0, 9);
+    main.foo2(new int[10], 0, 9, false);
     if (main.sum != 10) {
       System.out.println("foo2 failed!");
     }
@@ -1000,7 +1078,7 @@ public class Main {
     caught = false;
     main = new Main();
     try {
-      main.foo2(new int[10], 0, 10);
+      main.foo2(new int[10], 0, 10, true);
     } catch (ArrayIndexOutOfBoundsException e) {
       caught = true;
     }
@@ -1009,7 +1087,7 @@ public class Main {
     }
 
     main = new Main();
-    main.foo3(new int[10], 9);
+    main.foo3(new int[10], 9, false);
     if (main.sum != 7) {
       System.out.println("foo3 failed!");
     }
@@ -1017,7 +1095,7 @@ public class Main {
     caught = false;
     main = new Main();
     try {
-      main.foo3(new int[10], 10);
+      main.foo3(new int[10], 10, true);
     } catch (ArrayIndexOutOfBoundsException e) {
       caught = true;
     }
@@ -1026,7 +1104,7 @@ public class Main {
     }
 
     main = new Main();
-    main.foo4(new int[10], 10);
+    main.foo4(new int[10], 10, false);
     if (main.sum != 10) {
       System.out.println("foo4 failed!");
     }
@@ -1034,7 +1112,7 @@ public class Main {
     caught = false;
     main = new Main();
     try {
-      main.foo4(new int[10], 11);
+      main.foo4(new int[10], 11, true);
     } catch (ArrayIndexOutOfBoundsException e) {
       caught = true;
     }
@@ -1043,7 +1121,7 @@ public class Main {
     }
 
     main = new Main();
-    main.foo5(new int[10], 10);
+    main.foo5(new int[10], 10, false);
     if (main.sum != 24) {
       System.out.println("foo5 failed!");
     }
@@ -1051,7 +1129,7 @@ public class Main {
     caught = false;
     main = new Main();
     try {
-      main.foo5(new int[10], 11);
+      main.foo5(new int[10], 11, true);
     } catch (ArrayIndexOutOfBoundsException e) {
       caught = true;
     }
@@ -1060,11 +1138,11 @@ public class Main {
     }
 
     main = new Main();
-    main.foo6(new int[10], 2, 7);
+    main.foo6(new int[10], 2, 7, false);
 
     main = new Main();
     int[] array9 = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
-    main.foo9(array9);
+    main.foo9(array9, false);
     if (main.sum != 45) {
       System.out.println("foo9 failed!");
     }
@@ -1080,7 +1158,7 @@ public class Main {
     caught = false;
     main = new Main();
     try {
-      main.foo6(new int[10], 2, 8);
+      main.foo6(new int[10], 2, 8, true);
     } catch (ArrayIndexOutOfBoundsException e) {
       caught = true;
     }
@@ -1091,7 +1169,7 @@ public class Main {
     caught = false;
     main = new Main();
     try {
-      main.foo6(new int[10], 1, 7);
+      main.foo6(new int[10], 1, 7, true);
     } catch (ArrayIndexOutOfBoundsException e) {
       caught = true;
     }
@@ -1124,10 +1202,19 @@ public class Main {
   }
 
   // Make sure this method is compiled with optimizing.
-  // CHECK-START: void Main.main(java.lang.String[]) register (after)
-  // CHECK: ParallelMove
+  /// CHECK-START: void Main.main(java.lang.String[]) register (after)
+  /// CHECK: ParallelMove
 
   public static void main(String[] args) {
+    System.loadLibrary(args[0]);
+
+    if (!compiledWithOptimizing() ||
+        !hasOatFile() ||
+        runtimeIsSoftFail() ||
+        isInterpreted()) {
+      disableStackFrameAsserts();
+    }
+
     sieve(20);
 
     int[] array = {5, 2, 3, 7, 0, 1, 6, 4};
@@ -1166,4 +1253,11 @@ public class Main {
     new Main().testExceptionMessage();
   }
 
+  public static native boolean compiledWithOptimizing();
+  public static native void disableStackFrameAsserts();
+  public static native void assertIsManaged();
+  public static native void assertIsInterpreted();
+  public static native boolean hasOatFile();
+  public static native boolean runtimeIsSoftFail();
+  public static native boolean isInterpreted();
 }

@@ -19,6 +19,8 @@
 
 #include <stdint.h>
 
+namespace art {
+
 static constexpr uint32_t kAccPublic =       0x0001;  // class, field, method, ic
 static constexpr uint32_t kAccPrivate =      0x0002;  // field, method, ic
 static constexpr uint32_t kAccProtected =    0x0004;  // field, method, ic
@@ -47,31 +49,19 @@ static constexpr uint32_t kAccPreverified =          0x00080000;  // class (runt
                                                                   // method (dex only)
 static constexpr uint32_t kAccFastNative =           0x00080000;  // method (dex only)
 static constexpr uint32_t kAccMiranda =              0x00200000;  // method (dex only)
-
-// Flag is set if the compiler decides it is not worth trying
-// to inline the method. This avoids other callers to try it again and again.
-static constexpr uint32_t kAccDontInline =           0x00400000;  // method (dex only)
+static constexpr uint32_t kAccDefault =              0x00400000;  // method (runtime)
+// This is set by the class linker during LinkInterfaceMethods. Prior to that point we do not know
+// if any particular method needs to be a default conflict. Used to figure out at runtime if
+// invoking this method will throw an exception.
+static constexpr uint32_t kAccDefaultConflict =      0x00800000;  // method (runtime)
 
 // Special runtime-only flags.
-// Note: if only kAccClassIsReference is set, we have a soft reference.
-
+// Interface and all its super-interfaces with default methods have been recursively initialized.
+static constexpr uint32_t kAccRecursivelyInitialized    = 0x20000000;
+// Interface declares some default method.
+static constexpr uint32_t kAccHasDefaultMethod          = 0x40000000;
 // class/ancestor overrides finalize()
 static constexpr uint32_t kAccClassIsFinalizable        = 0x80000000;
-// class is a soft/weak/phantom ref
-static constexpr uint32_t kAccClassIsReference          = 0x08000000;
-// class is a weak reference
-static constexpr uint32_t kAccClassIsWeakReference      = 0x04000000;
-// class is a finalizer reference
-static constexpr uint32_t kAccClassIsFinalizerReference = 0x02000000;
-// class is a phantom reference
-static constexpr uint32_t kAccClassIsPhantomReference   = 0x01000000;
-// class is the string class
-static constexpr uint32_t kAccClassIsStringClass        = 0x00800000;
-
-static constexpr uint32_t kAccReferenceFlagsMask = (kAccClassIsReference
-                                                  | kAccClassIsWeakReference
-                                                  | kAccClassIsFinalizerReference
-                                                  | kAccClassIsPhantomReference);
 
 // Valid (meaningful) bits for a field.
 static constexpr uint32_t kAccValidFieldFlags = kAccPublic | kAccPrivate | kAccProtected |
@@ -95,6 +85,8 @@ static constexpr uint32_t kAccValidClassFlags = kAccPublic | kAccFinal | kAccSup
 // Note 3. Inner classes can expose more access flags to Java programs. That is handled by libcore.
 static constexpr uint32_t kAccValidInterfaceFlags = kAccPublic | kAccInterface |
     kAccAbstract | kAccSynthetic | kAccAnnotation;
+
+}  // namespace art
 
 #endif  // ART_RUNTIME_MODIFIERS_H_
 

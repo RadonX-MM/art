@@ -24,6 +24,23 @@
 
 namespace art {
 
+class ArtField;
+class ArtMethod;
+
+class ArtMethodVisitor {
+ public:
+  virtual ~ArtMethodVisitor() {}
+
+  virtual void Visit(ArtMethod* method) = 0;
+};
+
+class ArtFieldVisitor {
+ public:
+  virtual ~ArtFieldVisitor() {}
+
+  virtual void Visit(ArtField* method) = 0;
+};
+
 class PACKED(4) ImageSection {
  public:
   ImageSection() : offset_(0), size_(0) { }
@@ -47,6 +64,12 @@ class PACKED(4) ImageSection {
     return offset - offset_ < size_;
   }
 
+  // Visit ArtMethods in the section starting at base.
+  void VisitPackedArtMethods(ArtMethodVisitor* visitor, uint8_t* base, size_t pointer_size) const;
+
+  // Visit ArtMethods in the section starting at base.
+  void VisitPackedArtFields(ArtFieldVisitor* visitor, uint8_t* base) const;
+
  private:
   uint32_t offset_;
   uint32_t size_;
@@ -55,10 +78,13 @@ class PACKED(4) ImageSection {
 // header of image files written by ImageWriter, read and validated by Space.
 class PACKED(4) ImageHeader {
  public:
-  ImageHeader() : compile_pic_(0) {}
+  ImageHeader()
+      : image_begin_(0U), image_size_(0U), oat_checksum_(0U), oat_file_begin_(0U),
+        oat_data_begin_(0U), oat_data_end_(0U), oat_file_end_(0U), patch_delta_(0),
+        image_roots_(0U), pointer_size_(0U), compile_pic_(0) {}
 
   ImageHeader(uint32_t image_begin,
-              uint32_t image_size_,
+              uint32_t image_size,
               ImageSection* sections,
               uint32_t image_roots,
               uint32_t oat_checksum,
@@ -67,7 +93,7 @@ class PACKED(4) ImageHeader {
               uint32_t oat_data_end,
               uint32_t oat_file_end,
               uint32_t pointer_size,
-              bool compile_pic_);
+              bool compile_pic);
 
   bool IsValid() const;
   const char* GetMagic() const;
@@ -142,6 +168,7 @@ class PACKED(4) ImageHeader {
     kSectionObjects,
     kSectionArtFields,
     kSectionArtMethods,
+    kSectionDexCacheArrays,
     kSectionInternedStrings,
     kSectionImageBitmap,
     kSectionCount,  // Number of elements in enum.
@@ -156,9 +183,9 @@ class PACKED(4) ImageHeader {
   }
 
   mirror::Object* GetImageRoot(ImageRoot image_root) const
-      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+      SHARED_REQUIRES(Locks::mutator_lock_);
   mirror::ObjectArray<mirror::Object>* GetImageRoots() const
-      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+      SHARED_REQUIRES(Locks::mutator_lock_);
 
   void RelocateImage(off_t delta);
 

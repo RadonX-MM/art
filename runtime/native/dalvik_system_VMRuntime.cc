@@ -16,7 +16,7 @@
 
 #include "dalvik_system_VMRuntime.h"
 
-#ifdef HAVE_ANDROID_OS
+#ifdef __ANDROID__
 extern "C" void android_set_application_target_sdk_version(uint32_t version);
 #endif
 #include <limits.h>
@@ -196,7 +196,7 @@ static void VMRuntime_setTargetSdkVersionNative(JNIEnv*, jobject, jint target_sd
   // Note that targetSdkVersion may be 0, meaning "current".
   Runtime::Current()->SetTargetSdkVersion(target_sdk_version);
 
-#ifdef HAVE_ANDROID_OS
+#ifdef __ANDROID__
   // This part is letting libc/dynamic linker know about current app's
   // target sdk version to enable compatibility workarounds.
   android_set_application_target_sdk_version(static_cast<uint32_t>(target_sdk_version));
@@ -262,7 +262,7 @@ class PreloadDexCachesStringsVisitor : public SingleRootVisitor {
   explicit PreloadDexCachesStringsVisitor(StringTable* table) : table_(table) { }
 
   void VisitRoot(mirror::Object* root, const RootInfo& info ATTRIBUTE_UNUSED)
-      OVERRIDE SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+      OVERRIDE SHARED_REQUIRES(Locks::mutator_lock_) {
     mirror::String* string = root->AsString();
     table_->operator[](string->ToModifiedUtf8()) = string;
   }
@@ -274,7 +274,7 @@ class PreloadDexCachesStringsVisitor : public SingleRootVisitor {
 // Based on ClassLinker::ResolveString.
 static void PreloadDexCachesResolveString(
     Handle<mirror::DexCache> dex_cache, uint32_t string_idx, StringTable& strings)
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    SHARED_REQUIRES(Locks::mutator_lock_) {
   mirror::String* string = dex_cache->GetResolvedString(string_idx);
   if (string != nullptr) {
     return;
@@ -292,7 +292,7 @@ static void PreloadDexCachesResolveString(
 // Based on ClassLinker::ResolveType.
 static void PreloadDexCachesResolveType(
     Thread* self, mirror::DexCache* dex_cache, uint32_t type_idx)
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    SHARED_REQUIRES(Locks::mutator_lock_) {
   mirror::Class* klass = dex_cache->GetResolvedType(type_idx);
   if (klass != nullptr) {
     return;
@@ -321,7 +321,7 @@ static void PreloadDexCachesResolveType(
 // Based on ClassLinker::ResolveField.
 static void PreloadDexCachesResolveField(Handle<mirror::DexCache> dex_cache, uint32_t field_idx,
                                          bool is_static)
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    SHARED_REQUIRES(Locks::mutator_lock_) {
   ArtField* field = dex_cache->GetResolvedField(field_idx, sizeof(void*));
   if (field != nullptr) {
     return;
@@ -349,7 +349,7 @@ static void PreloadDexCachesResolveField(Handle<mirror::DexCache> dex_cache, uin
 // Based on ClassLinker::ResolveMethod.
 static void PreloadDexCachesResolveMethod(Handle<mirror::DexCache> dex_cache, uint32_t method_idx,
                                           InvokeType invoke_type)
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    SHARED_REQUIRES(Locks::mutator_lock_) {
   ArtMethod* method = dex_cache->GetResolvedMethod(method_idx, sizeof(void*));
   if (method != nullptr) {
     return;
@@ -423,16 +423,19 @@ static void PreloadDexCachesStatsTotal(DexCacheStats* total) {
 }
 
 static void PreloadDexCachesStatsFilled(DexCacheStats* filled)
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    SHARED_REQUIRES(Locks::mutator_lock_) {
   if (!kPreloadDexCachesCollectStats) {
-      return;
+    return;
   }
-  ClassLinker* linker = Runtime::Current()->GetClassLinker();
-  const std::vector<const DexFile*>& boot_class_path = linker->GetBootClassPath();
-  for (size_t i = 0; i< boot_class_path.size(); i++) {
-    const DexFile* dex_file = boot_class_path[i];
+  ClassLinker* const class_linker = Runtime::Current()->GetClassLinker();
+  Thread* const self = Thread::Current();
+  for (const DexFile* dex_file : class_linker->GetBootClassPath()) {
     CHECK(dex_file != nullptr);
-    mirror::DexCache* dex_cache = linker->FindDexCache(*dex_file);
+    mirror::DexCache* const dex_cache = class_linker->FindDexCache(self, *dex_file, true);
+    // If dex cache was deallocated, just continue.
+    if (dex_cache == nullptr) {
+      continue;
+    }
     for (size_t j = 0; j < dex_cache->NumStrings(); j++) {
       mirror::String* string = dex_cache->GetResolvedString(j);
       if (string != nullptr) {
@@ -446,7 +449,7 @@ static void PreloadDexCachesStatsFilled(DexCacheStats* filled)
       }
     }
     for (size_t j = 0; j < dex_cache->NumResolvedFields(); j++) {
-      ArtField* field = linker->GetResolvedField(j, dex_cache);
+      ArtField* field = class_linker->GetResolvedField(j, dex_cache);
       if (field != nullptr) {
         filled->num_fields++;
       }
@@ -490,11 +493,12 @@ static void VMRuntime_preloadDexCaches(JNIEnv* env, jobject) {
   }
 
   const std::vector<const DexFile*>& boot_class_path = linker->GetBootClassPath();
-  for (size_t i = 0; i< boot_class_path.size(); i++) {
+  for (size_t i = 0; i < boot_class_path.size(); i++) {
     const DexFile* dex_file = boot_class_path[i];
     CHECK(dex_file != nullptr);
     StackHandleScope<1> hs(soa.Self());
-    Handle<mirror::DexCache> dex_cache(hs.NewHandle(linker->FindDexCache(*dex_file)));
+    Handle<mirror::DexCache> dex_cache(
+        hs.NewHandle(linker->RegisterDexFile(*dex_file, runtime->GetLinearAlloc())));
 
     if (kPreloadDexCachesStrings) {
       for (size_t j = 0; j < dex_cache->NumStrings(); j++) {
@@ -558,17 +562,20 @@ static void VMRuntime_preloadDexCaches(JNIEnv* env, jobject) {
 
 /*
  * This is called by the framework when it knows the application directory and
- * process name.  We use this information to start up the sampling profiler for
- * for ART.
+ * process name.
  */
-static void VMRuntime_registerAppInfo(JNIEnv* env, jclass, jstring pkgName,
-                                      jstring appDir ATTRIBUTE_UNUSED,
+static void VMRuntime_registerAppInfo(JNIEnv* env,
+                                      jclass clazz ATTRIBUTE_UNUSED,
+                                      jstring pkgName,
+                                      jstring appDir,
                                       jstring procName ATTRIBUTE_UNUSED) {
-  const char *pkgNameChars = env->GetStringUTFChars(pkgName, nullptr);
-  std::string profileFile = StringPrintf("/data/dalvik-cache/profiles/%s", pkgNameChars);
+  const char* appDirChars = env->GetStringUTFChars(appDir, nullptr);
+  const char* pkgNameChars = env->GetStringUTFChars(pkgName, nullptr);
+  std::string profileFile = StringPrintf("%s/code_cache/%s.prof", appDirChars, pkgNameChars);
 
-  Runtime::Current()->StartProfiler(profileFile.c_str());
+  Runtime::Current()->SetJitProfilingFilename(profileFile.c_str());
 
+  env->ReleaseStringUTFChars(appDir, appDirChars);
   env->ReleaseStringUTFChars(pkgName, pkgNameChars);
 }
 

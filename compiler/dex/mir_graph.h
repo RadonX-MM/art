@@ -19,6 +19,7 @@
 
 #include <stdint.h>
 
+#include "base/arena_bit_vector.h"
 #include "base/arena_containers.h"
 #include "base/bit_utils.h"
 #include "base/scoped_arena_containers.h"
@@ -30,7 +31,6 @@
 #include "mir_method_info.h"
 #include "reg_location.h"
 #include "reg_storage.h"
-#include "utils/arena_bit_vector.h"
 
 #ifdef QC_STRONG
 #define QC_WEAK
@@ -272,7 +272,7 @@ class MIR : public ArenaObject<kArenaAllocMIR> {
     uint32_t arg[5];         /* vC/D/E/F/G in invoke or filled-new-array */
     Instruction::Code opcode;
 
-    explicit DecodedInstruction():vA(0), vB(0), vB_wide(0), vC(0), opcode(Instruction::NOP) {
+    DecodedInstruction() : vA(0), vB(0), vB_wide(0), vC(0), opcode(Instruction::NOP) {
     }
 
     /*
@@ -364,8 +364,8 @@ class MIR : public ArenaObject<kArenaAllocMIR> {
     uint32_t method_lowering_info;
   } meta;
 
-  explicit MIR() : offset(0), optimization_flags(0), m_unit_index(0), bb(NullBasicBlockId),
-                 next(nullptr), ssa_rep(nullptr), extraData(nullptr) {
+  MIR() : offset(0), optimization_flags(0), m_unit_index(0), bb(NullBasicBlockId),
+                 next(nullptr), ssa_rep(nullptr) {
     memset(&meta, 0, sizeof(meta));
   }
 
@@ -382,7 +382,7 @@ class MIR : public ArenaObject<kArenaAllocMIR> {
 
 struct SuccessorBlockInfo;
 
-class BasicBlock : public DeletableArenaObject<kArenaAllocBB> {
+class BasicBlock : public DeletableArenaObject<kArenaAllocBasicBlock> {
  public:
   BasicBlock(BasicBlockId block_id, BBType type, ArenaAllocator* allocator)
       : id(block_id),
@@ -393,7 +393,7 @@ class BasicBlock : public DeletableArenaObject<kArenaAllocBB> {
         terminated_by_return(), dominates_return(), use_lvn(), first_mir_insn(),
         last_mir_insn(), data_flow_info(), dominators(), i_dominated(), dom_frontier(),
         predecessors(allocator->Adapter(kArenaAllocBBPredecessors)),
-        successor_blocks(allocator->Adapter(kArenaAllocSuccessor)) {
+        successor_blocks(allocator->Adapter(kArenaAllocSuccessors)) {
   }
   BasicBlockId id;
   BasicBlockId dfs_id;
@@ -589,9 +589,14 @@ class MIRGraph {
    * Parse dex method and add MIR at current insert point.  Returns id (which is
    * actually the index of the method in the m_units_ array).
    */
-  void InlineMethod(const DexFile::CodeItem* code_item, uint32_t access_flags,
-                    InvokeType invoke_type, uint16_t class_def_idx,
-                    uint32_t method_idx, jobject class_loader, const DexFile& dex_file);
+  void InlineMethod(const DexFile::CodeItem* code_item,
+                    uint32_t access_flags,
+                    InvokeType invoke_type,
+                    uint16_t class_def_idx,
+                    uint32_t method_idx,
+                    jobject class_loader,
+                    const DexFile& dex_file,
+                    Handle<mirror::DexCache> dex_cache);
 
   /* Find existing block */
   BasicBlock* FindBlock(DexOffset code_offset,

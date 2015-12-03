@@ -27,7 +27,7 @@ class SsaLivenessAnalysis;
 
 static constexpr int kNoRegister = -1;
 
-class BlockInfo : public ArenaObject<kArenaAllocMisc> {
+class BlockInfo : public ArenaObject<kArenaAllocSsaLiveness> {
  public:
   BlockInfo(ArenaAllocator* allocator, const HBasicBlock& block, size_t number_of_ssa_values)
       : block_(block),
@@ -55,7 +55,7 @@ class BlockInfo : public ArenaObject<kArenaAllocMisc> {
  * A live range contains the start and end of a range where an instruction or a temporary
  * is live.
  */
-class LiveRange FINAL : public ArenaObject<kArenaAllocMisc> {
+class LiveRange FINAL : public ArenaObject<kArenaAllocSsaLiveness> {
  public:
   LiveRange(size_t start, size_t end, LiveRange* next) : start_(start), end_(end), next_(next) {
     DCHECK_LT(start, end);
@@ -76,7 +76,7 @@ class LiveRange FINAL : public ArenaObject<kArenaAllocMisc> {
   }
 
   void Dump(std::ostream& stream) const {
-    stream << "[" << start_ << ", " << end_ << ")";
+    stream << "[" << start_ << "," << end_ << ")";
   }
 
   LiveRange* Dup(ArenaAllocator* allocator) const {
@@ -101,7 +101,7 @@ class LiveRange FINAL : public ArenaObject<kArenaAllocMisc> {
 /**
  * A use position represents a live interval use at a given position.
  */
-class UsePosition : public ArenaObject<kArenaAllocMisc> {
+class UsePosition : public ArenaObject<kArenaAllocSsaLiveness> {
  public:
   UsePosition(HInstruction* user,
               HEnvironment* environment,
@@ -117,6 +117,7 @@ class UsePosition : public ArenaObject<kArenaAllocMisc> {
         || user->IsPhi()
         || (GetPosition() == user->GetLifetimePosition() + 1)
         || (GetPosition() == user->GetLifetimePosition()));
+    DCHECK(environment == nullptr || user == nullptr);
     DCHECK(next_ == nullptr || next->GetPosition() >= GetPosition());
   }
 
@@ -128,6 +129,7 @@ class UsePosition : public ArenaObject<kArenaAllocMisc> {
   void SetNext(UsePosition* next) { next_ = next; }
 
   HInstruction* GetUser() const { return user_; }
+  HEnvironment* GetEnvironment() const { return environment_; }
 
   bool GetIsEnvironment() const { return environment_ != nullptr; }
   bool IsSynthesized() const { return user_ == nullptr; }
@@ -167,7 +169,7 @@ class UsePosition : public ArenaObject<kArenaAllocMisc> {
   DISALLOW_COPY_AND_ASSIGN(UsePosition);
 };
 
-class SafepointPosition : public ArenaObject<kArenaAllocMisc> {
+class SafepointPosition : public ArenaObject<kArenaAllocSsaLiveness> {
  public:
   explicit SafepointPosition(HInstruction* instruction)
       : instruction_(instruction),
@@ -204,7 +206,7 @@ class SafepointPosition : public ArenaObject<kArenaAllocMisc> {
  * An interval is a list of disjoint live ranges where an instruction is live.
  * Each instruction that has uses gets an interval.
  */
-class LiveInterval : public ArenaObject<kArenaAllocMisc> {
+class LiveInterval : public ArenaObject<kArenaAllocSsaLiveness> {
  public:
   static LiveInterval* MakeInterval(ArenaAllocator* allocator,
                                     Primitive::Type type,
@@ -280,7 +282,7 @@ class LiveInterval : public ArenaObject<kArenaAllocMisc> {
       }
       DCHECK(first_use_->GetPosition() + 1 == position);
       UsePosition* new_use = new (allocator_) UsePosition(
-          instruction, environment, input_index, position, cursor->GetNext());
+          instruction, nullptr /* environment */, input_index, position, cursor->GetNext());
       cursor->SetNext(new_use);
       if (first_range_->GetEnd() == first_use_->GetPosition()) {
         first_range_->end_ = position;
@@ -290,10 +292,10 @@ class LiveInterval : public ArenaObject<kArenaAllocMisc> {
 
     if (is_environment) {
       first_env_use_ = new (allocator_) UsePosition(
-          instruction, environment, input_index, position, first_env_use_);
+          nullptr /* instruction */, environment, input_index, position, first_env_use_);
     } else {
       first_use_ = new (allocator_) UsePosition(
-          instruction, environment, input_index, position, first_use_);
+          instruction, nullptr /* environment */, input_index, position, first_use_);
     }
 
     if (is_environment && !keep_alive) {
@@ -392,7 +394,7 @@ class LiveInterval : public ArenaObject<kArenaAllocMisc> {
       first_range_->start_ = from;
     } else {
       // Instruction without uses.
-      DCHECK(!defined_by_->HasNonEnvironmentUses());
+      DCHECK(first_use_ == nullptr);
       DCHECK(from == defined_by_->GetLifetimePosition());
       first_range_ = last_range_ = range_search_start_ =
           new (allocator_) LiveRange(from, from + 2, nullptr);
@@ -540,6 +542,15 @@ class LiveInterval : public ArenaObject<kArenaAllocMisc> {
 
   HInstruction* GetDefinedBy() const {
     return defined_by_;
+  }
+
+  bool HasWillCallSafepoint() const {
+    for (SafepointPosition* safepoint = first_safepoint_;
+         safepoint != nullptr;
+         safepoint = safepoint->GetNext()) {
+      if (safepoint->GetLocations()->WillCall()) return true;
+    }
+    return false;
   }
 
   SafepointPosition* FindSafepointJustBefore(size_t position) const {
@@ -1095,33 +1106,34 @@ class SsaLivenessAnalysis : public ValueObject {
   SsaLivenessAnalysis(HGraph* graph, CodeGenerator* codegen)
       : graph_(graph),
         codegen_(codegen),
-        block_infos_(graph->GetArena(), graph->GetBlocks().Size()),
-        instructions_from_ssa_index_(graph->GetArena(), 0),
-        instructions_from_lifetime_position_(graph->GetArena(), 0),
+        block_infos_(graph->GetBlocks().size(),
+                     nullptr,
+                     graph->GetArena()->Adapter(kArenaAllocSsaLiveness)),
+        instructions_from_ssa_index_(graph->GetArena()->Adapter(kArenaAllocSsaLiveness)),
+        instructions_from_lifetime_position_(graph->GetArena()->Adapter(kArenaAllocSsaLiveness)),
         number_of_ssa_values_(0) {
-    block_infos_.SetSize(graph->GetBlocks().Size());
   }
 
   void Analyze();
 
   BitVector* GetLiveInSet(const HBasicBlock& block) const {
-    return &block_infos_.Get(block.GetBlockId())->live_in_;
+    return &block_infos_[block.GetBlockId()]->live_in_;
   }
 
   BitVector* GetLiveOutSet(const HBasicBlock& block) const {
-    return &block_infos_.Get(block.GetBlockId())->live_out_;
+    return &block_infos_[block.GetBlockId()]->live_out_;
   }
 
   BitVector* GetKillSet(const HBasicBlock& block) const {
-    return &block_infos_.Get(block.GetBlockId())->kill_;
+    return &block_infos_[block.GetBlockId()]->kill_;
   }
 
   HInstruction* GetInstructionFromSsaIndex(size_t index) const {
-    return instructions_from_ssa_index_.Get(index);
+    return instructions_from_ssa_index_[index];
   }
 
   HInstruction* GetInstructionFromPosition(size_t index) const {
-    return instructions_from_lifetime_position_.Get(index);
+    return instructions_from_lifetime_position_[index];
   }
 
   HBasicBlock* GetBlockFromPosition(size_t index) const {
@@ -1152,7 +1164,7 @@ class SsaLivenessAnalysis : public ValueObject {
   }
 
   size_t GetMaxLifetimePosition() const {
-    return instructions_from_lifetime_position_.Size() * 2 - 1;
+    return instructions_from_lifetime_position_.size() * 2 - 1;
   }
 
   size_t GetNumberOfSsaValues() const {
@@ -1198,22 +1210,26 @@ class SsaLivenessAnalysis : public ValueObject {
     // A value that's not live in compiled code may still be needed in interpreter,
     // due to code motion, etc.
     if (env_holder->IsDeoptimize()) return true;
+    // A value live at a throwing instruction in a try block may be copied by
+    // the exception handler to its location at the top of the catch block.
+    if (env_holder->CanThrowIntoCatchBlock()) return true;
     if (instruction->GetBlock()->GetGraph()->IsDebuggable()) return true;
     return instruction->GetType() == Primitive::kPrimNot;
   }
 
   HGraph* const graph_;
   CodeGenerator* const codegen_;
-  GrowableArray<BlockInfo*> block_infos_;
+  ArenaVector<BlockInfo*> block_infos_;
 
   // Temporary array used when computing live_in, live_out, and kill sets.
-  GrowableArray<HInstruction*> instructions_from_ssa_index_;
+  ArenaVector<HInstruction*> instructions_from_ssa_index_;
 
   // Temporary array used when inserting moves in the graph.
-  GrowableArray<HInstruction*> instructions_from_lifetime_position_;
+  ArenaVector<HInstruction*> instructions_from_lifetime_position_;
   size_t number_of_ssa_values_;
 
   ART_FRIEND_TEST(RegisterAllocatorTest, SpillInactive);
+  ART_FRIEND_TEST(RegisterAllocatorTest, FreeUntil);
 
   DISALLOW_COPY_AND_ASSIGN(SsaLivenessAnalysis);
 };

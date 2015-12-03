@@ -50,7 +50,6 @@ class QuickAssembleX86TestBase : public testing::Test {
         false,
         false,
         nullptr,
-        new PassManagerOptions(),
         nullptr,
         false));
     verification_results_.reset(new VerificationResults(compiler_options_.get()));
@@ -70,6 +69,7 @@ class QuickAssembleX86TestBase : public testing::Test {
         false,
         false,
         "",
+        false,
         0,
         -1,
         ""));

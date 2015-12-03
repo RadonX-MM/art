@@ -22,6 +22,7 @@
 #include "driver/compiler_driver.h"
 #include "utils/arm64/assembler_arm64.h"
 #include "oat.h"
+#include "oat_quick_method_header.h"
 #include "output_stream.h"
 
 namespace art {
@@ -73,7 +74,7 @@ uint32_t Arm64RelativePatcher::ReserveSpace(uint32_t offset,
   // Now that we have the actual offset where the code will be placed, locate the ADRP insns
   // that actually require the thunk.
   uint32_t quick_code_offset = compiled_method->AlignCode(offset) + sizeof(OatQuickMethodHeader);
-  ArrayRef<const uint8_t> code(*compiled_method->GetQuickCode());
+  ArrayRef<const uint8_t> code = compiled_method->GetQuickCode();
   uint32_t thunk_offset = compiled_method->AlignCode(quick_code_offset + code.size());
   DCHECK(compiled_method != nullptr);
   for (const LinkerPatch& patch : compiled_method->GetPatches()) {
@@ -108,7 +109,7 @@ uint32_t Arm64RelativePatcher::WriteThunks(OutputStream* out, uint32_t offset) {
     if (!current_method_thunks_.empty()) {
       uint32_t aligned_offset = CompiledMethod::AlignCode(offset, kArm64);
       if (kIsDebugBuild) {
-        CHECK(IsAligned<kAdrpThunkSize>(current_method_thunks_.size()));
+        CHECK_ALIGNED(current_method_thunks_.size(), kAdrpThunkSize);
         size_t num_thunks = current_method_thunks_.size() / kAdrpThunkSize;
         CHECK_LE(num_thunks, processed_adrp_thunks_);
         for (size_t i = 0u; i != num_thunks; ++i) {
@@ -203,7 +204,7 @@ void Arm64RelativePatcher::PatchDexCacheReference(std::vector<uint8_t>* code,
       if ((adrp & 0x9f000000u) != 0x90000000u) {
         CHECK(fix_cortex_a53_843419_);
         CHECK_EQ(adrp & 0xfc000000u, 0x14000000u);  // B <thunk>
-        CHECK(IsAligned<kAdrpThunkSize>(current_method_thunks_.size()));
+        CHECK_ALIGNED(current_method_thunks_.size(), kAdrpThunkSize);
         size_t num_thunks = current_method_thunks_.size() / kAdrpThunkSize;
         CHECK_LE(num_thunks, processed_adrp_thunks_);
         uint32_t b_offset = patch_offset - literal_offset + pc_insn_offset;
@@ -233,7 +234,7 @@ std::vector<uint8_t> Arm64RelativePatcher::CompileThunkCode() {
       kArm64PointerSize).Int32Value());
   assembler.JumpTo(ManagedRegister(arm64::X0), offset, ManagedRegister(arm64::IP0));
   // Ensure we emit the literal pool.
-  assembler.EmitSlowPaths();
+  assembler.FinalizeCode();
   std::vector<uint8_t> thunk_code(assembler.CodeSize());
   MemoryRegion code(thunk_code.data(), thunk_code.size());
   assembler.FinalizeInstructions(code);

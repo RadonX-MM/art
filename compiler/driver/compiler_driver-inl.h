@@ -31,10 +31,10 @@
 namespace art {
 
 inline mirror::DexCache* CompilerDriver::GetDexCache(const DexCompilationUnit* mUnit) {
-  return mUnit->GetClassLinker()->FindDexCache(*mUnit->GetDexFile());
+  return mUnit->GetClassLinker()->FindDexCache(Thread::Current(), *mUnit->GetDexFile(), false);
 }
 
-inline mirror::ClassLoader* CompilerDriver::GetClassLoader(ScopedObjectAccess& soa,
+inline mirror::ClassLoader* CompilerDriver::GetClassLoader(const ScopedObjectAccess& soa,
                                                            const DexCompilationUnit* mUnit) {
   return soa.Decode<mirror::ClassLoader*>(mUnit->GetClassLoader());
 }
@@ -87,7 +87,7 @@ inline ArtField* CompilerDriver::ResolveFieldWithDexFile(
 }
 
 inline mirror::DexCache* CompilerDriver::FindDexCache(const DexFile* dex_file) {
-  return Runtime::Current()->GetClassLinker()->FindDexCache(*dex_file);
+  return Runtime::Current()->GetClassLinker()->FindDexCache(Thread::Current(), *dex_file, false);
 }
 
 inline ArtField* CompilerDriver::ResolveField(
@@ -187,15 +187,11 @@ inline std::pair<bool, bool> CompilerDriver::IsClassOfStaticMemberAvailableToRef
         // Search dex file for localized ssb index, may fail if member's class is a parent
         // of the class mentioned in the dex file and there is no dex cache entry.
         std::string temp;
-        const DexFile::StringId* string_id =
-            dex_file->FindStringId(resolved_member->GetDeclaringClass()->GetDescriptor(&temp));
-        if (string_id != nullptr) {
-          const DexFile::TypeId* type_id =
-             dex_file->FindTypeId(dex_file->GetIndexForStringId(*string_id));
-          if (type_id != nullptr) {
-            // medium path, needs check of static storage base being initialized
-            storage_idx = dex_file->GetIndexForTypeId(*type_id);
-          }
+        const DexFile::TypeId* type_id =
+           dex_file->FindTypeId(resolved_member->GetDeclaringClass()->GetDescriptor(&temp));
+        if (type_id != nullptr) {
+          // medium path, needs check of static storage base being initialized
+          storage_idx = dex_file->GetIndexForTypeId(*type_id);
         }
       }
       if (storage_idx != DexFile::kDexNoIndex) {
@@ -267,10 +263,9 @@ inline ArtMethod* CompilerDriver::ResolveMethod(
     ScopedObjectAccess& soa, Handle<mirror::DexCache> dex_cache,
     Handle<mirror::ClassLoader> class_loader, const DexCompilationUnit* mUnit,
     uint32_t method_idx, InvokeType invoke_type, bool check_incompatible_class_change) {
-  DCHECK_EQ(dex_cache->GetDexFile(), mUnit->GetDexFile());
   DCHECK_EQ(class_loader.Get(), soa.Decode<mirror::ClassLoader*>(mUnit->GetClassLoader()));
   ArtMethod* resolved_method = mUnit->GetClassLinker()->ResolveMethod(
-      *mUnit->GetDexFile(), method_idx, dex_cache, class_loader, nullptr, invoke_type);
+      *dex_cache->GetDexFile(), method_idx, dex_cache, class_loader, nullptr, invoke_type);
   DCHECK_EQ(resolved_method == nullptr, soa.Self()->IsExceptionPending());
   if (UNLIKELY(resolved_method == nullptr)) {
     // Clean up any exception left by type resolution.
@@ -334,13 +329,14 @@ inline int CompilerDriver::IsFastInvoke(
       resolved_method->GetMethodIndex() < methods_class->GetVTableLength() &&
       (methods_class->GetVTableEntry(
           resolved_method->GetMethodIndex(), pointer_size) == resolved_method) &&
-      !resolved_method->IsAbstract();
+      resolved_method->IsInvokable();
 
   if (can_sharpen_virtual_based_on_type || can_sharpen_super_based_on_type) {
     // Sharpen a virtual call into a direct call. The method_idx is into referrer's
     // dex cache, check that this resolved method is where we expect it.
     CHECK_EQ(target_method->dex_file, mUnit->GetDexFile());
-    DCHECK_EQ(dex_cache.Get(), mUnit->GetClassLinker()->FindDexCache(*mUnit->GetDexFile()));
+    DCHECK_EQ(dex_cache.Get(), mUnit->GetClassLinker()->FindDexCache(
+        soa.Self(), *mUnit->GetDexFile(), false));
     CHECK_EQ(referrer_class->GetDexCache()->GetResolvedMethod(
         target_method->dex_method_index, pointer_size),
              resolved_method) << PrettyMethod(resolved_method);
@@ -370,13 +366,15 @@ inline int CompilerDriver::IsFastInvoke(
           nullptr, kVirtual);
     } else {
       StackHandleScope<1> hs(soa.Self());
-      auto target_dex_cache(hs.NewHandle(class_linker->FindDexCache(*devirt_target->dex_file)));
+      auto target_dex_cache(hs.NewHandle(class_linker->RegisterDexFile(
+          *devirt_target->dex_file,
+          class_linker->GetOrCreateAllocatorForClassLoader(class_loader.Get()))));
       called_method = class_linker->ResolveMethod(
           *devirt_target->dex_file, devirt_target->dex_method_index, target_dex_cache,
           class_loader, nullptr, kVirtual);
     }
     CHECK(called_method != nullptr);
-    CHECK(!called_method->IsAbstract());
+    CHECK(called_method->IsInvokable());
     int stats_flags = kFlagMethodResolved;
     GetCodeAndMethodForDirectCall(/*out*/invoke_type,
                                   kDirect,  // Sharp type

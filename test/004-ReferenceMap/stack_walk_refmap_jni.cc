@@ -19,20 +19,24 @@
 
 namespace art {
 
-#define CHECK_REGS_CONTAIN_REFS(dex_pc, abort_if_not_found, ...) do { \
-  int t[] = {__VA_ARGS__}; \
-  int t_size = sizeof(t) / sizeof(*t); \
-  uintptr_t native_quick_pc = m->ToNativeQuickPc(dex_pc, abort_if_not_found); \
-  if (native_quick_pc != UINTPTR_MAX) { \
-    CheckReferences(t, t_size, m->NativeQuickPcOffset(native_quick_pc)); \
-  } \
+#define CHECK_REGS_CONTAIN_REFS(dex_pc, abort_if_not_found, ...) do {                 \
+  int t[] = {__VA_ARGS__};                                                            \
+  int t_size = sizeof(t) / sizeof(*t);                                                \
+  const OatQuickMethodHeader* method_header = GetCurrentOatQuickMethodHeader();       \
+  uintptr_t native_quick_pc = method_header->ToNativeQuickPc(GetMethod(),             \
+                                                 dex_pc,                              \
+                                                 /* is_catch_handler */ false,        \
+                                                 abort_if_not_found);                 \
+  if (native_quick_pc != UINTPTR_MAX) {                                               \
+    CheckReferences(t, t_size, method_header->NativeQuickPcOffset(native_quick_pc));  \
+  }                                                                                   \
 } while (false);
 
 struct ReferenceMap2Visitor : public CheckReferenceMapVisitor {
-  explicit ReferenceMap2Visitor(Thread* thread) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_)
+  explicit ReferenceMap2Visitor(Thread* thread) SHARED_REQUIRES(Locks::mutator_lock_)
       : CheckReferenceMapVisitor(thread) {}
 
-  bool VisitFrame() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+  bool VisitFrame() SHARED_REQUIRES(Locks::mutator_lock_) {
     if (CheckReferenceMapVisitor::VisitFrame()) {
       return true;
     }
@@ -45,9 +49,13 @@ struct ReferenceMap2Visitor : public CheckReferenceMapVisitor {
     if (m_name.compare("f") == 0) {
       CHECK_REGS_CONTAIN_REFS(0x03U, true, 8);  // v8: this
       CHECK_REGS_CONTAIN_REFS(0x06U, true, 8, 1);  // v8: this, v1: x
-      CHECK_REGS_CONTAIN_REFS(0x08U, true, 8, 3, 1);  // v8: this, v3: y, v1: x
+      if (!GetCurrentOatQuickMethodHeader()->IsOptimized()) {
+        CHECK_REGS_CONTAIN_REFS(0x08U, true, 8, 3, 1);  // v8: this, v3: y, v1: x
+      }
       CHECK_REGS_CONTAIN_REFS(0x0cU, true, 8, 3, 1);  // v8: this, v3: y, v1: x
-      CHECK_REGS_CONTAIN_REFS(0x0eU, true, 8, 3, 1);  // v8: this, v3: y, v1: x
+      if (!GetCurrentOatQuickMethodHeader()->IsOptimized()) {
+        CHECK_REGS_CONTAIN_REFS(0x0eU, true, 8, 3, 1);  // v8: this, v3: y, v1: x
+      }
       CHECK_REGS_CONTAIN_REFS(0x10U, true, 8, 3, 1);  // v8: this, v3: y, v1: x
       // v2 is added because of the instruction at DexPC 0024. Object merges with 0 is Object. See:
       //   0024: move-object v3, v2
@@ -60,13 +68,20 @@ struct ReferenceMap2Visitor : public CheckReferenceMapVisitor {
       CHECK_REGS_CONTAIN_REFS(0x13U, false, 3);  // v3: y
       // Note that v0: ex can be eliminated because it's a dead merge of two different exceptions.
       CHECK_REGS_CONTAIN_REFS(0x18U, true, 8, 2, 1);  // v8: this, v2: y, v1: x (dead v0: ex)
-      CHECK_REGS_CONTAIN_REFS(0x1aU, true, 8, 5, 2, 1);  // v8: this, v5: x[1], v2: y, v1: x (dead v0: ex)
-      CHECK_REGS_CONTAIN_REFS(0x1dU, true, 8, 5, 2, 1);  // v8: this, v5: x[1], v2: y, v1: x (dead v0: ex)
-      // v5 is removed from the root set because there is a "merge" operation.
-      // See 0015: if-nez v2, 001f.
-      CHECK_REGS_CONTAIN_REFS(0x1fU, true, 8, 2, 1);  // v8: this, v2: y, v1: x (dead v0: ex)
+      if (!GetCurrentOatQuickMethodHeader()->IsOptimized()) {
+        // v8: this, v5: x[1], v2: y, v1: x (dead v0: ex)
+        CHECK_REGS_CONTAIN_REFS(0x1aU, true, 8, 5, 2, 1);
+        // v8: this, v5: x[1], v2: y, v1: x (dead v0: ex)
+        CHECK_REGS_CONTAIN_REFS(0x1dU, true, 8, 5, 2, 1);
+        // v5 is removed from the root set because there is a "merge" operation.
+        // See 0015: if-nez v2, 001f.
+        CHECK_REGS_CONTAIN_REFS(0x1fU, true, 8, 2, 1);  // v8: this, v2: y, v1: x (dead v0: ex)
+      }
       CHECK_REGS_CONTAIN_REFS(0x21U, true, 8, 2, 1);  // v8: this, v2: y, v1: x (dead v0: ex)
-      CHECK_REGS_CONTAIN_REFS(0x27U, true, 8, 4, 2, 1);  // v8: this, v4: ex, v2: y, v1: x
+
+      if (!GetCurrentOatQuickMethodHeader()->IsOptimized()) {
+        CHECK_REGS_CONTAIN_REFS(0x27U, true, 8, 4, 2, 1);  // v8: this, v4: ex, v2: y, v1: x
+      }
       CHECK_REGS_CONTAIN_REFS(0x29U, true, 8, 4, 2, 1);  // v8: this, v4: ex, v2: y, v1: x
       CHECK_REGS_CONTAIN_REFS(0x2cU, true, 8, 4, 2, 1);  // v8: this, v4: ex, v2: y, v1: x
       // Note that it is OK for a compiler to not have a dex map at these two dex PCs because

@@ -44,6 +44,7 @@ void Class::SetClassClass(Class* java_lang_Class) {
       << java_lang_Class_.Read()
       << " " << java_lang_Class;
   CHECK(java_lang_Class != nullptr);
+  java_lang_Class->SetClassFlags(mirror::kClassFlagClass);
   java_lang_Class_ = GcRoot<Class>(java_lang_Class);
 }
 
@@ -54,6 +55,15 @@ void Class::ResetClass() {
 
 void Class::VisitRoots(RootVisitor* visitor) {
   java_lang_Class_.VisitRootIfNonNull(visitor, RootInfo(kRootStickyClass));
+}
+
+inline void Class::SetVerifyError(mirror::Object* error) {
+  CHECK(error != nullptr) << PrettyClass(this);
+  if (Runtime::Current()->IsActiveTransaction()) {
+    SetFieldObject<true>(OFFSET_OF_OBJECT_MEMBER(Class, verify_error_), error);
+  } else {
+    SetFieldObject<false>(OFFSET_OF_OBJECT_MEMBER(Class, verify_error_), error);
+  }
 }
 
 void Class::SetStatus(Handle<Class> h_this, Status new_status, Thread* self) {
@@ -77,37 +87,16 @@ void Class::SetStatus(Handle<Class> h_this, Status new_status, Thread* self) {
     CHECK_NE(h_this->GetStatus(), kStatusError)
         << "Attempt to set as erroneous an already erroneous class "
         << PrettyClass(h_this.Get());
-
-    // Stash current exception.
-    StackHandleScope<1> hs(self);
-    Handle<mirror::Throwable> old_exception(hs.NewHandle(self->GetException()));
-    CHECK(old_exception.Get() != nullptr);
-    Class* eiie_class;
-    // Do't attempt to use FindClass if we have an OOM error since this can try to do more
-    // allocations and may cause infinite loops.
-    bool throw_eiie = (old_exception.Get() == nullptr);
-    if (!throw_eiie) {
-      std::string temp;
-      const char* old_exception_descriptor = old_exception->GetClass()->GetDescriptor(&temp);
-      throw_eiie = (strcmp(old_exception_descriptor, "Ljava/lang/OutOfMemoryError;") != 0);
-    }
-    if (throw_eiie) {
-      // Clear exception to call FindSystemClass.
-      self->ClearException();
-      eiie_class = Runtime::Current()->GetClassLinker()->FindSystemClass(
-          self, "Ljava/lang/ExceptionInInitializerError;");
-      CHECK(!self->IsExceptionPending());
-      // Only verification errors, not initialization problems, should set a verify error.
-      // This is to ensure that ThrowEarlierClassFailure will throw NoClassDefFoundError in that
-      // case.
-      Class* exception_class = old_exception->GetClass();
-      if (!eiie_class->IsAssignableFrom(exception_class)) {
-        h_this->SetVerifyErrorClass(exception_class);
+    if (VLOG_IS_ON(class_linker)) {
+      LOG(ERROR) << "Setting " << PrettyDescriptor(h_this.Get()) << " to erroneous.";
+      if (self->IsExceptionPending()) {
+        LOG(ERROR) << "Exception: " << self->GetException()->Dump();
       }
     }
 
-    // Restore exception.
-    self->SetException(old_exception.Get());
+    // Remember the current exception.
+    CHECK(self->GetException() != nullptr);
+    h_this->SetVerifyError(self->GetException());
   }
   static_assert(sizeof(Status) == sizeof(uint32_t), "Size of status not equal to uint32");
   if (Runtime::Current()->IsActiveTransaction()) {
@@ -504,6 +493,16 @@ ArtMethod* Class::FindDeclaredVirtualMethod(const DexCache* dex_cache, uint32_t 
   return nullptr;
 }
 
+ArtMethod* Class::FindDeclaredVirtualMethodByName(const StringPiece& name, size_t pointer_size) {
+  for (auto& method : GetVirtualMethods(pointer_size)) {
+    ArtMethod* const np_method = method.GetInterfaceMethodIfProxy(pointer_size);
+    if (name == np_method->GetName()) {
+      return &method;
+    }
+  }
+  return nullptr;
+}
+
 ArtMethod* Class::FindVirtualMethod(
     const StringPiece& name, const StringPiece& signature, size_t pointer_size) {
   for (Class* klass = this; klass != nullptr; klass = klass->GetSuperClass()) {
@@ -548,24 +547,58 @@ ArtMethod* Class::FindClassInitializer(size_t pointer_size) {
   return nullptr;
 }
 
-ArtField* Class::FindDeclaredInstanceField(const StringPiece& name, const StringPiece& type) {
-  // Is the field in this class?
-  // Interfaces are not relevant because they can't contain instance fields.
-  for (size_t i = 0; i < NumInstanceFields(); ++i) {
-    ArtField* f = GetInstanceField(i);
-    if (name == f->GetName() && type == f->GetTypeDescriptor()) {
-      return f;
+// Custom binary search to avoid double comparisons from std::binary_search.
+static ArtField* FindFieldByNameAndType(LengthPrefixedArray<ArtField>* fields,
+                                        const StringPiece& name,
+                                        const StringPiece& type)
+    SHARED_REQUIRES(Locks::mutator_lock_) {
+  if (fields == nullptr) {
+    return nullptr;
+  }
+  size_t low = 0;
+  size_t high = fields->size();
+  ArtField* ret = nullptr;
+  while (low < high) {
+    size_t mid = (low + high) / 2;
+    ArtField& field = fields->At(mid);
+    // Fields are sorted by class, then name, then type descriptor. This is verified in dex file
+    // verifier. There can be multiple fields with the same in the same class name due to proguard.
+    int result = StringPiece(field.GetName()).Compare(name);
+    if (result == 0) {
+      result = StringPiece(field.GetTypeDescriptor()).Compare(type);
+    }
+    if (result < 0) {
+      low = mid + 1;
+    } else if (result > 0) {
+      high = mid;
+    } else {
+      ret = &field;
+      break;
     }
   }
-  return nullptr;
+  if (kIsDebugBuild) {
+    ArtField* found = nullptr;
+    for (ArtField& field : MakeIterationRangeFromLengthPrefixedArray(fields)) {
+      if (name == field.GetName() && type == field.GetTypeDescriptor()) {
+        found = &field;
+        break;
+      }
+    }
+    CHECK_EQ(found, ret) << "Found " << PrettyField(found) << " vs  " << PrettyField(ret);
+  }
+  return ret;
+}
+
+ArtField* Class::FindDeclaredInstanceField(const StringPiece& name, const StringPiece& type) {
+  // Binary search by name. Interfaces are not relevant because they can't contain instance fields.
+  return FindFieldByNameAndType(GetIFieldsPtr(), name, type);
 }
 
 ArtField* Class::FindDeclaredInstanceField(const DexCache* dex_cache, uint32_t dex_field_idx) {
   if (GetDexCache() == dex_cache) {
-    for (size_t i = 0; i < NumInstanceFields(); ++i) {
-      ArtField* f = GetInstanceField(i);
-      if (f->GetDexFieldIndex() == dex_field_idx) {
-        return f;
+    for (ArtField& field : GetIFields()) {
+      if (field.GetDexFieldIndex() == dex_field_idx) {
+        return &field;
       }
     }
   }
@@ -598,21 +631,14 @@ ArtField* Class::FindInstanceField(const DexCache* dex_cache, uint32_t dex_field
 
 ArtField* Class::FindDeclaredStaticField(const StringPiece& name, const StringPiece& type) {
   DCHECK(type != nullptr);
-  for (size_t i = 0; i < NumStaticFields(); ++i) {
-    ArtField* f = GetStaticField(i);
-    if (name == f->GetName() && type == f->GetTypeDescriptor()) {
-      return f;
-    }
-  }
-  return nullptr;
+  return FindFieldByNameAndType(GetSFieldsPtr(), name, type);
 }
 
 ArtField* Class::FindDeclaredStaticField(const DexCache* dex_cache, uint32_t dex_field_idx) {
   if (dex_cache == GetDexCache()) {
-    for (size_t i = 0; i < NumStaticFields(); ++i) {
-      ArtField* f = GetStaticField(i);
-      if (f->GetDexFieldIndex() == dex_field_idx) {
-        return f;
+    for (ArtField& field : GetSFields()) {
+      if (field.GetDexFieldIndex() == dex_field_idx) {
+        return &field;
       }
     }
   }
@@ -700,12 +726,12 @@ ArtField* Class::FindField(Thread* self, Handle<Class> klass, const StringPiece&
 void Class::SetPreverifiedFlagOnAllMethods(size_t pointer_size) {
   DCHECK(IsVerified());
   for (auto& m : GetDirectMethods(pointer_size)) {
-    if (!m.IsNative() && !m.IsAbstract()) {
+    if (!m.IsNative() && m.IsInvokable()) {
       m.SetPreverified();
     }
   }
   for (auto& m : GetVirtualMethods(pointer_size)) {
-    if (!m.IsNative() && !m.IsAbstract()) {
+    if (!m.IsNative() && m.IsInvokable()) {
       m.SetPreverified();
     }
   }
@@ -776,6 +802,18 @@ mirror::Class* Class::GetDirectInterface(Thread* self, Handle<mirror::Class> kla
   }
 }
 
+mirror::Class* Class::GetCommonSuperClass(Handle<Class> klass) {
+  DCHECK(klass.Get() != nullptr);
+  DCHECK(!klass->IsInterface());
+  DCHECK(!IsInterface());
+  mirror::Class* common_super_class = this;
+  while (!common_super_class->IsAssignableFrom(klass.Get())) {
+    common_super_class = common_super_class->GetSuperClass();
+  }
+  DCHECK(common_super_class != nullptr);
+  return common_super_class;
+}
+
 const char* Class::GetSourceFile() {
   const DexFile& dex_file = GetDexFile();
   const DexFile::ClassDef* dex_class_def = GetClassDef();
@@ -824,24 +862,56 @@ void Class::PopulateEmbeddedImtAndVTable(ArtMethod* const (&methods)[kImtSize],
   }
 }
 
+class ReadBarrierOnNativeRootsVisitor {
+ public:
+  void operator()(mirror::Object* obj ATTRIBUTE_UNUSED,
+                  MemberOffset offset ATTRIBUTE_UNUSED,
+                  bool is_static ATTRIBUTE_UNUSED) const {}
+
+  void VisitRootIfNonNull(mirror::CompressedReference<mirror::Object>* root) const
+      SHARED_REQUIRES(Locks::mutator_lock_) {
+    if (!root->IsNull()) {
+      VisitRoot(root);
+    }
+  }
+
+  void VisitRoot(mirror::CompressedReference<mirror::Object>* root) const
+      SHARED_REQUIRES(Locks::mutator_lock_) {
+    mirror::Object* old_ref = root->AsMirrorPtr();
+    mirror::Object* new_ref = ReadBarrier::BarrierForRoot(root);
+    if (old_ref != new_ref) {
+      // Update the field atomically. This may fail if mutator updates before us, but it's ok.
+      auto* atomic_root =
+          reinterpret_cast<Atomic<mirror::CompressedReference<mirror::Object>>*>(root);
+      atomic_root->CompareExchangeStrongSequentiallyConsistent(
+          mirror::CompressedReference<mirror::Object>::FromMirrorPtr(old_ref),
+          mirror::CompressedReference<mirror::Object>::FromMirrorPtr(new_ref));
+    }
+  }
+};
+
 // The pre-fence visitor for Class::CopyOf().
 class CopyClassVisitor {
  public:
-  explicit CopyClassVisitor(Thread* self, Handle<mirror::Class>* orig, size_t new_length,
-                            size_t copy_bytes, ArtMethod* const (&imt)[mirror::Class::kImtSize],
-                            size_t pointer_size)
+  CopyClassVisitor(Thread* self, Handle<mirror::Class>* orig, size_t new_length,
+                   size_t copy_bytes, ArtMethod* const (&imt)[mirror::Class::kImtSize],
+                   size_t pointer_size)
       : self_(self), orig_(orig), new_length_(new_length),
         copy_bytes_(copy_bytes), imt_(imt), pointer_size_(pointer_size) {
   }
 
   void operator()(mirror::Object* obj, size_t usable_size ATTRIBUTE_UNUSED) const
-      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+      SHARED_REQUIRES(Locks::mutator_lock_) {
     StackHandleScope<1> hs(self_);
     Handle<mirror::Class> h_new_class_obj(hs.NewHandle(obj->AsClass()));
     mirror::Object::CopyObject(self_, h_new_class_obj.Get(), orig_->Get(), copy_bytes_);
     mirror::Class::SetStatus(h_new_class_obj, Class::kStatusResolving, self_);
     h_new_class_obj->PopulateEmbeddedImtAndVTable(imt_, pointer_size_);
     h_new_class_obj->SetClassSize(new_length_);
+    // Visit all of the references to make sure there is no from space references in the native
+    // roots.
+    static_cast<mirror::Object*>(h_new_class_obj.Get())->VisitReferences(
+        ReadBarrierOnNativeRootsVisitor(), VoidFunctor());
   }
 
  private:

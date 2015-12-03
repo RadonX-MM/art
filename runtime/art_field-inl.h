@@ -24,7 +24,7 @@
 #include "gc_root-inl.h"
 #include "gc/accounting/card_table-inl.h"
 #include "jvalue.h"
-#include "mirror/dex_cache.h"
+#include "mirror/dex_cache-inl.h"
 #include "mirror/object-inl.h"
 #include "primitive.h"
 #include "thread-inl.h"
@@ -34,7 +34,8 @@
 namespace art {
 
 inline mirror::Class* ArtField::GetDeclaringClass() {
-  mirror::Class* result = declaring_class_.Read();
+  GcRootSource gc_root_source(this);
+  mirror::Class* result = declaring_class_.Read(&gc_root_source);
   DCHECK(result != nullptr);
   DCHECK(result->IsLoaded() || result->IsErroneous());
   return result;
@@ -252,7 +253,7 @@ inline void ArtField::SetObject(mirror::Object* object, mirror::Object* l) {
   SetObj<kTransactionActive>(object, l);
 }
 
-inline const char* ArtField::GetName() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+inline const char* ArtField::GetName() SHARED_REQUIRES(Locks::mutator_lock_) {
   uint32_t field_index = GetDexFieldIndex();
   if (UNLIKELY(GetDeclaringClass()->IsProxyClass())) {
     DCHECK(IsStatic());
@@ -263,7 +264,7 @@ inline const char* ArtField::GetName() SHARED_LOCKS_REQUIRED(Locks::mutator_lock
   return dex_file->GetFieldName(dex_file->GetFieldId(field_index));
 }
 
-inline const char* ArtField::GetTypeDescriptor() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+inline const char* ArtField::GetTypeDescriptor() SHARED_REQUIRES(Locks::mutator_lock_) {
   uint32_t field_index = GetDexFieldIndex();
   if (UNLIKELY(GetDeclaringClass()->IsProxyClass())) {
     DCHECK(IsStatic());
@@ -277,11 +278,11 @@ inline const char* ArtField::GetTypeDescriptor() SHARED_LOCKS_REQUIRED(Locks::mu
 }
 
 inline Primitive::Type ArtField::GetTypeAsPrimitiveType()
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    SHARED_REQUIRES(Locks::mutator_lock_) {
   return Primitive::GetType(GetTypeDescriptor()[0]);
 }
 
-inline bool ArtField::IsPrimitiveType() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+inline bool ArtField::IsPrimitiveType() SHARED_REQUIRES(Locks::mutator_lock_) {
   return GetTypeAsPrimitiveType() != Primitive::kPrimNot;
 }
 
@@ -303,15 +304,15 @@ inline mirror::Class* ArtField::GetType() {
   return type;
 }
 
-inline size_t ArtField::FieldSize() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+inline size_t ArtField::FieldSize() SHARED_REQUIRES(Locks::mutator_lock_) {
   return Primitive::ComponentSize(GetTypeAsPrimitiveType());
 }
 
-inline mirror::DexCache* ArtField::GetDexCache() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+inline mirror::DexCache* ArtField::GetDexCache() SHARED_REQUIRES(Locks::mutator_lock_) {
   return GetDeclaringClass()->GetDexCache();
 }
 
-inline const DexFile* ArtField::GetDexFile() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+inline const DexFile* ArtField::GetDexFile() SHARED_REQUIRES(Locks::mutator_lock_) {
   return GetDexCache()->GetDexFile();
 }
 

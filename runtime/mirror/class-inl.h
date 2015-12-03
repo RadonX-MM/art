@@ -28,6 +28,7 @@
 #include "dex_file.h"
 #include "gc/heap-inl.h"
 #include "iftable.h"
+#include "length_prefixed_array.h"
 #include "object_array-inl.h"
 #include "read_barrier-inl.h"
 #include "reference-inl.h"
@@ -61,25 +62,28 @@ inline DexCache* Class::GetDexCache() {
   return GetFieldObject<DexCache, kVerifyFlags>(OFFSET_OF_OBJECT_MEMBER(Class, dex_cache_));
 }
 
-inline ArtMethod* Class::GetDirectMethodsPtr() {
+inline LengthPrefixedArray<ArtMethod>* Class::GetDirectMethodsPtr() {
   DCHECK(IsLoaded() || IsErroneous());
   return GetDirectMethodsPtrUnchecked();
 }
 
-inline ArtMethod* Class::GetDirectMethodsPtrUnchecked() {
-  return reinterpret_cast<ArtMethod*>(GetField64(OFFSET_OF_OBJECT_MEMBER(Class, direct_methods_)));
+inline LengthPrefixedArray<ArtMethod>* Class::GetDirectMethodsPtrUnchecked() {
+  return reinterpret_cast<LengthPrefixedArray<ArtMethod>*>(
+      GetField64(OFFSET_OF_OBJECT_MEMBER(Class, direct_methods_)));
 }
 
-inline ArtMethod* Class::GetVirtualMethodsPtrUnchecked() {
-  return reinterpret_cast<ArtMethod*>(GetField64(OFFSET_OF_OBJECT_MEMBER(Class, virtual_methods_)));
+inline LengthPrefixedArray<ArtMethod>* Class::GetVirtualMethodsPtrUnchecked() {
+  return reinterpret_cast<LengthPrefixedArray<ArtMethod>*>(
+      GetField64(OFFSET_OF_OBJECT_MEMBER(Class, virtual_methods_)));
 }
 
-inline void Class::SetDirectMethodsPtr(ArtMethod* new_direct_methods) {
+inline void Class::SetDirectMethodsPtr(LengthPrefixedArray<ArtMethod>* new_direct_methods) {
   DCHECK(GetDirectMethodsPtrUnchecked() == nullptr);
   SetDirectMethodsPtrUnchecked(new_direct_methods);
 }
 
-inline void Class::SetDirectMethodsPtrUnchecked(ArtMethod* new_direct_methods) {
+inline void Class::SetDirectMethodsPtrUnchecked(
+    LengthPrefixedArray<ArtMethod>* new_direct_methods) {
   SetField64<false>(OFFSET_OF_OBJECT_MEMBER(Class, direct_methods_),
                     reinterpret_cast<uint64_t>(new_direct_methods));
 }
@@ -88,25 +92,27 @@ inline ArtMethod* Class::GetDirectMethodUnchecked(size_t i, size_t pointer_size)
   CheckPointerSize(pointer_size);
   auto* methods = GetDirectMethodsPtrUnchecked();
   DCHECK(methods != nullptr);
-  return reinterpret_cast<ArtMethod*>(reinterpret_cast<uintptr_t>(methods) +
-      ArtMethod::ObjectSize(pointer_size) * i);
+  return &methods->At(i,
+                      ArtMethod::Size(pointer_size),
+                      ArtMethod::Alignment(pointer_size));
 }
 
 inline ArtMethod* Class::GetDirectMethod(size_t i, size_t pointer_size) {
   CheckPointerSize(pointer_size);
   auto* methods = GetDirectMethodsPtr();
   DCHECK(methods != nullptr);
-  return reinterpret_cast<ArtMethod*>(reinterpret_cast<uintptr_t>(methods) +
-      ArtMethod::ObjectSize(pointer_size) * i);
+  return &methods->At(i,
+                      ArtMethod::Size(pointer_size),
+                      ArtMethod::Alignment(pointer_size));
 }
 
 template<VerifyObjectFlags kVerifyFlags>
-inline ArtMethod* Class::GetVirtualMethodsPtr() {
+inline LengthPrefixedArray<ArtMethod>* Class::GetVirtualMethodsPtr() {
   DCHECK(IsLoaded<kVerifyFlags>() || IsErroneous<kVerifyFlags>());
   return GetVirtualMethodsPtrUnchecked();
 }
 
-inline void Class::SetVirtualMethodsPtr(ArtMethod* new_virtual_methods) {
+inline void Class::SetVirtualMethodsPtr(LengthPrefixedArray<ArtMethod>* new_virtual_methods) {
   // TODO: we reassign virtual methods to grow the table for miranda
   // methods.. they should really just be assigned once.
   SetField64<false>(OFFSET_OF_OBJECT_MEMBER(Class, virtual_methods_),
@@ -129,10 +135,11 @@ inline ArtMethod* Class::GetVirtualMethodDuringLinking(size_t i, size_t pointer_
 
 inline ArtMethod* Class::GetVirtualMethodUnchecked(size_t i, size_t pointer_size) {
   CheckPointerSize(pointer_size);
-  auto* methods = GetVirtualMethodsPtrUnchecked();
+  LengthPrefixedArray<ArtMethod>* methods = GetVirtualMethodsPtrUnchecked();
   DCHECK(methods != nullptr);
-  return reinterpret_cast<ArtMethod*>(reinterpret_cast<uintptr_t>(methods) +
-      ArtMethod::ObjectSize(pointer_size) * i);
+  return &methods->At(i,
+                      ArtMethod::Size(pointer_size),
+                      ArtMethod::Alignment(pointer_size));
 }
 
 inline PointerArray* Class::GetVTable() {
@@ -385,7 +392,8 @@ inline ArtMethod* Class::FindVirtualMethodForInterface(ArtMethod* method, size_t
 }
 
 inline ArtMethod* Class::FindVirtualMethodForVirtual(ArtMethod* method, size_t pointer_size) {
-  DCHECK(!method->GetDeclaringClass()->IsInterface() || method->IsMiranda());
+  // Only miranda or default methods may come from interfaces and be used as a virtual.
+  DCHECK(!method->GetDeclaringClass()->IsInterface() || method->IsDefault() || method->IsMiranda());
   // The argument method may from a super class.
   // Use the index to a potentially overridden one for this instance's class.
   return GetVTableEntry(method->GetMethodIndex(), pointer_size);
@@ -423,9 +431,9 @@ inline void Class::SetIfTable(IfTable* new_iftable) {
   SetFieldObject<false>(OFFSET_OF_OBJECT_MEMBER(Class, iftable_), new_iftable);
 }
 
-inline ArtField* Class::GetIFields() {
+inline LengthPrefixedArray<ArtField>* Class::GetIFieldsPtr() {
   DCHECK(IsLoaded() || IsErroneous());
-  return GetFieldPtr<ArtField*>(OFFSET_OF_OBJECT_MEMBER(Class, ifields_));
+  return GetFieldPtr<LengthPrefixedArray<ArtField>*>(OFFSET_OF_OBJECT_MEMBER(Class, ifields_));
 }
 
 inline MemberOffset Class::GetFirstReferenceInstanceFieldOffset() {
@@ -458,46 +466,44 @@ inline MemberOffset Class::GetFirstReferenceStaticFieldOffsetDuringLinking(size_
   return MemberOffset(base);
 }
 
-inline void Class::SetIFields(ArtField* new_ifields) {
-  DCHECK(GetIFieldsUnchecked() == nullptr);
+inline void Class::SetIFieldsPtr(LengthPrefixedArray<ArtField>* new_ifields) {
+  DCHECK(GetIFieldsPtrUnchecked() == nullptr);
   return SetFieldPtr<false>(OFFSET_OF_OBJECT_MEMBER(Class, ifields_), new_ifields);
 }
 
-inline void Class::SetIFieldsUnchecked(ArtField* new_ifields) {
+inline void Class::SetIFieldsPtrUnchecked(LengthPrefixedArray<ArtField>* new_ifields) {
   SetFieldPtr<false, true, kVerifyNone>(OFFSET_OF_OBJECT_MEMBER(Class, ifields_), new_ifields);
 }
 
-inline ArtField* Class::GetSFieldsUnchecked() {
-  return GetFieldPtr<ArtField*>(OFFSET_OF_OBJECT_MEMBER(Class, sfields_));
+inline LengthPrefixedArray<ArtField>* Class::GetSFieldsPtrUnchecked() {
+  return GetFieldPtr<LengthPrefixedArray<ArtField>*>(OFFSET_OF_OBJECT_MEMBER(Class, sfields_));
 }
 
-inline ArtField* Class::GetIFieldsUnchecked() {
-  return GetFieldPtr<ArtField*>(OFFSET_OF_OBJECT_MEMBER(Class, ifields_));
+inline LengthPrefixedArray<ArtField>* Class::GetIFieldsPtrUnchecked() {
+  return GetFieldPtr<LengthPrefixedArray<ArtField>*>(OFFSET_OF_OBJECT_MEMBER(Class, ifields_));
 }
 
-inline ArtField* Class::GetSFields() {
+inline LengthPrefixedArray<ArtField>* Class::GetSFieldsPtr() {
   DCHECK(IsLoaded() || IsErroneous()) << GetStatus();
-  return GetSFieldsUnchecked();
+  return GetSFieldsPtrUnchecked();
 }
 
-inline void Class::SetSFields(ArtField* new_sfields) {
+inline void Class::SetSFieldsPtr(LengthPrefixedArray<ArtField>* new_sfields) {
   DCHECK((IsRetired() && new_sfields == nullptr) ||
          GetFieldPtr<ArtField*>(OFFSET_OF_OBJECT_MEMBER(Class, sfields_)) == nullptr);
   SetFieldPtr<false>(OFFSET_OF_OBJECT_MEMBER(Class, sfields_), new_sfields);
 }
 
-inline void Class::SetSFieldsUnchecked(ArtField* new_sfields) {
+inline void Class::SetSFieldsPtrUnchecked(LengthPrefixedArray<ArtField>* new_sfields) {
   SetFieldPtr<false, true, kVerifyNone>(OFFSET_OF_OBJECT_MEMBER(Class, sfields_), new_sfields);
 }
 
 inline ArtField* Class::GetStaticField(uint32_t i) {
-  DCHECK_LT(i, NumStaticFields());
-  return &GetSFields()[i];
+  return &GetSFieldsPtr()->At(i);
 }
 
 inline ArtField* Class::GetInstanceField(uint32_t i) {
-  DCHECK_LT(i, NumInstanceFields());
-  return &GetIFields()[i];
+  return &GetIFieldsPtr()->At(i);
 }
 
 template<VerifyObjectFlags kVerifyFlags>
@@ -511,15 +517,6 @@ inline void Class::SetClinitThreadId(pid_t new_clinit_thread_id) {
     SetField32<true>(OFFSET_OF_OBJECT_MEMBER(Class, clinit_thread_id_), new_clinit_thread_id);
   } else {
     SetField32<false>(OFFSET_OF_OBJECT_MEMBER(Class, clinit_thread_id_), new_clinit_thread_id);
-  }
-}
-
-inline void Class::SetVerifyErrorClass(Class* klass) {
-  CHECK(klass != nullptr) << PrettyClass(this);
-  if (Runtime::Current()->IsActiveTransaction()) {
-    SetFieldObject<true>(OFFSET_OF_OBJECT_MEMBER(Class, verify_error_class_), klass);
-  } else {
-    SetFieldObject<false>(OFFSET_OF_OBJECT_MEMBER(Class, verify_error_class_), klass);
   }
 }
 
@@ -542,6 +539,7 @@ inline uint32_t Class::GetAccessFlags() {
 inline String* Class::GetName() {
   return GetFieldObject<String>(OFFSET_OF_OBJECT_MEMBER(Class, name_));
 }
+
 inline void Class::SetName(String* name) {
   if (Runtime::Current()->IsActiveTransaction()) {
     SetFieldObject<true>(OFFSET_OF_OBJECT_MEMBER(Class, name_), name);
@@ -552,7 +550,8 @@ inline void Class::SetName(String* name) {
 
 template<VerifyObjectFlags kVerifyFlags>
 inline Primitive::Type Class::GetPrimitiveType() {
-  DCHECK_EQ(sizeof(Primitive::Type), sizeof(int32_t));
+  static_assert(sizeof(Primitive::Type) == sizeof(int32_t),
+                "art::Primitive::Type and int32_t have different sizes.");
   int32_t v32 = GetField32<kVerifyFlags>(OFFSET_OF_OBJECT_MEMBER(Class, primitive_type_));
   Primitive::Type type = static_cast<Primitive::Type>(v32 & 0xFFFF);
   DCHECK_EQ(static_cast<size_t>(v32 >> 16), Primitive::ComponentSizeShift(type));
@@ -561,7 +560,8 @@ inline Primitive::Type Class::GetPrimitiveType() {
 
 template<VerifyObjectFlags kVerifyFlags>
 inline size_t Class::GetPrimitiveTypeSizeShift() {
-  DCHECK_EQ(sizeof(Primitive::Type), sizeof(int32_t));
+  static_assert(sizeof(Primitive::Type) == sizeof(int32_t),
+                "art::Primitive::Type and int32_t have different sizes.");
   int32_t v32 = GetField32<kVerifyFlags>(OFFSET_OF_OBJECT_MEMBER(Class, primitive_type_));
   size_t size_shift = static_cast<Primitive::Type>(v32 >> 16);
   DCHECK_EQ(size_shift, Primitive::ComponentSizeShift(static_cast<Primitive::Type>(v32 & 0xFFFF)));
@@ -662,11 +662,11 @@ inline uint32_t Class::ComputeClassSize(bool has_embedded_tables,
   return size;
 }
 
-template <bool kVisitClass, typename Visitor>
+template <typename Visitor>
 inline void Class::VisitReferences(mirror::Class* klass, const Visitor& visitor) {
-  VisitInstanceFieldsReferences<kVisitClass>(klass, visitor);
+  VisitInstanceFieldsReferences(klass, visitor);
   // Right after a class is allocated, but not yet loaded
-  // (kStatusNotReady, see ClassLinkder::LoadClass()), GC may find it
+  // (kStatusNotReady, see ClassLinker::LoadClass()), GC may find it
   // and scan it. IsTemp() may call Class::GetAccessFlags() but may
   // fail in the DCHECK in Class::GetAccessFlags() because the class
   // status is kStatusNotReady. To avoid it, rely on IsResolved()
@@ -676,8 +676,10 @@ inline void Class::VisitReferences(mirror::Class* klass, const Visitor& visitor)
     // Temp classes don't ever populate imt/vtable or static fields and they are not even
     // allocated with the right size for those. Also, unresolved classes don't have fields
     // linked yet.
-    VisitStaticFieldsReferences<kVisitClass>(this, visitor);
+    VisitStaticFieldsReferences(this, visitor);
   }
+  // Since this class is reachable, we must also visit the associated roots when we scan it.
+  VisitNativeRoots(visitor, Runtime::Current()->GetClassLinker()->GetImagePointerSize());
 }
 
 template<ReadBarrierOption kReadBarrierOption>
@@ -775,9 +777,17 @@ inline void Class::InitializeClassVisitor::operator()(
 inline void Class::SetAccessFlags(uint32_t new_access_flags) {
   // Called inside a transaction when setting pre-verified flag during boot image compilation.
   if (Runtime::Current()->IsActiveTransaction()) {
-    SetField32<true>(OFFSET_OF_OBJECT_MEMBER(Class, access_flags_), new_access_flags);
+    SetField32<true>(AccessFlagsOffset(), new_access_flags);
   } else {
-    SetField32<false>(OFFSET_OF_OBJECT_MEMBER(Class, access_flags_), new_access_flags);
+    SetField32<false>(AccessFlagsOffset(), new_access_flags);
+  }
+}
+
+inline void Class::SetClassFlags(uint32_t new_flags) {
+  if (Runtime::Current()->IsActiveTransaction()) {
+    SetField32<true>(OFFSET_OF_OBJECT_MEMBER(Class, class_flags_), new_flags);
+  } else {
+    SetField32<false>(OFFSET_OF_OBJECT_MEMBER(Class, class_flags_), new_flags);
   }
 }
 
@@ -799,92 +809,66 @@ inline uint32_t Class::NumDirectInterfaces() {
   }
 }
 
-inline void Class::SetDexCacheStrings(ObjectArray<String>* new_dex_cache_strings) {
-  SetFieldObject<false>(DexCacheStringsOffset(), new_dex_cache_strings);
+inline void Class::SetDexCacheStrings(GcRoot<String>* new_dex_cache_strings) {
+  SetFieldPtr<false>(DexCacheStringsOffset(), new_dex_cache_strings);
 }
 
-inline ObjectArray<String>* Class::GetDexCacheStrings() {
-  return GetFieldObject<ObjectArray<String>>(DexCacheStringsOffset());
+inline GcRoot<String>* Class::GetDexCacheStrings() {
+  return GetFieldPtr<GcRoot<String>*>(DexCacheStringsOffset());
 }
 
 template<class Visitor>
 void mirror::Class::VisitNativeRoots(Visitor& visitor, size_t pointer_size) {
-  ArtField* const sfields = GetSFieldsUnchecked();
-  // Since we visit class roots while we may be writing these fields, check against null.
-  if (sfields != nullptr) {
-    for (size_t i = 0, count = NumStaticFields(); i < count; ++i) {
-      auto* f = &sfields[i];
-      if (kIsDebugBuild && IsResolved()) {
-        CHECK_EQ(f->GetDeclaringClass(), this) << GetStatus();
-      }
-      f->VisitRoots(visitor);
+  for (ArtField& field : GetSFieldsUnchecked()) {
+    // Visit roots first in case the declaring class gets moved.
+    field.VisitRoots(visitor);
+    if (kIsDebugBuild && IsResolved()) {
+      CHECK_EQ(field.GetDeclaringClass(), this) << GetStatus();
     }
   }
-  ArtField* const ifields = GetIFieldsUnchecked();
-  if (ifields != nullptr) {
-    for (size_t i = 0, count = NumInstanceFields(); i < count; ++i) {
-      auto* f = &ifields[i];
-      if (kIsDebugBuild && IsResolved()) {
-        CHECK_EQ(f->GetDeclaringClass(), this) << GetStatus();
-      }
-      f->VisitRoots(visitor);
+  for (ArtField& field : GetIFieldsUnchecked()) {
+    // Visit roots first in case the declaring class gets moved.
+    field.VisitRoots(visitor);
+    if (kIsDebugBuild && IsResolved()) {
+      CHECK_EQ(field.GetDeclaringClass(), this) << GetStatus();
     }
   }
-  // We may see GetDirectMethodsPtr() == null with NumDirectMethods() != 0 if the root marking
-  // thread reads a null DirectMethodsBegin() but a non null DirectMethodsBegin() due to a race
-  // SetDirectMethodsPtr from class linking. Same for virtual methods.
-  // In this case, it is safe to avoid marking the roots since we must be either the CC or CMS. If
-  // we are CMS then the roots are already marked through other sources, otherwise the roots are
-  // already marked due to the to-space invariant.
-  if (GetDirectMethodsPtr() != nullptr) {
-    for (auto& m : GetDirectMethods(pointer_size)) {
-      m.VisitRoots(visitor);
-    }
+  for (ArtMethod& method : GetDirectMethods(pointer_size)) {
+    method.VisitRoots(visitor, pointer_size);
   }
-  if (GetVirtualMethodsPtr() != nullptr) {
-    for (auto& m : GetVirtualMethods(pointer_size)) {
-      m.VisitRoots(visitor);
-    }
+  for (ArtMethod& method : GetVirtualMethods(pointer_size)) {
+    method.VisitRoots(visitor, pointer_size);
   }
-}
-
-inline StrideIterator<ArtMethod> Class::DirectMethodsBegin(size_t pointer_size)  {
-  CheckPointerSize(pointer_size);
-  auto* methods = GetDirectMethodsPtrUnchecked();
-  auto stride = ArtMethod::ObjectSize(pointer_size);
-  return StrideIterator<ArtMethod>(reinterpret_cast<uintptr_t>(methods), stride);
-}
-
-inline StrideIterator<ArtMethod> Class::DirectMethodsEnd(size_t pointer_size) {
-  CheckPointerSize(pointer_size);
-  auto* methods = GetDirectMethodsPtrUnchecked();
-  auto stride = ArtMethod::ObjectSize(pointer_size);
-  auto count = NumDirectMethods();
-  return StrideIterator<ArtMethod>(reinterpret_cast<uintptr_t>(methods) + stride * count, stride);
 }
 
 inline IterationRange<StrideIterator<ArtMethod>> Class::GetDirectMethods(size_t pointer_size) {
   CheckPointerSize(pointer_size);
-  return MakeIterationRange(DirectMethodsBegin(pointer_size), DirectMethodsEnd(pointer_size));
-}
-
-inline StrideIterator<ArtMethod> Class::VirtualMethodsBegin(size_t pointer_size)  {
-  CheckPointerSize(pointer_size);
-  auto* methods = GetVirtualMethodsPtrUnchecked();
-  auto stride = ArtMethod::ObjectSize(pointer_size);
-  return StrideIterator<ArtMethod>(reinterpret_cast<uintptr_t>(methods), stride);
-}
-
-inline StrideIterator<ArtMethod> Class::VirtualMethodsEnd(size_t pointer_size) {
-  CheckPointerSize(pointer_size);
-  auto* methods = GetVirtualMethodsPtrUnchecked();
-  auto stride = ArtMethod::ObjectSize(pointer_size);
-  auto count = NumVirtualMethods();
-  return StrideIterator<ArtMethod>(reinterpret_cast<uintptr_t>(methods) + stride * count, stride);
+  return MakeIterationRangeFromLengthPrefixedArray(GetDirectMethodsPtrUnchecked(),
+                                                   ArtMethod::Size(pointer_size),
+                                                   ArtMethod::Alignment(pointer_size));
 }
 
 inline IterationRange<StrideIterator<ArtMethod>> Class::GetVirtualMethods(size_t pointer_size) {
-  return MakeIterationRange(VirtualMethodsBegin(pointer_size), VirtualMethodsEnd(pointer_size));
+  CheckPointerSize(pointer_size);
+  return MakeIterationRangeFromLengthPrefixedArray(GetVirtualMethodsPtrUnchecked(),
+                                                   ArtMethod::Size(pointer_size),
+                                                   ArtMethod::Alignment(pointer_size));
+}
+
+inline IterationRange<StrideIterator<ArtField>> Class::GetIFields() {
+  return MakeIterationRangeFromLengthPrefixedArray(GetIFieldsPtr());
+}
+
+inline IterationRange<StrideIterator<ArtField>> Class::GetSFields() {
+  return MakeIterationRangeFromLengthPrefixedArray(GetSFieldsPtr());
+}
+
+inline IterationRange<StrideIterator<ArtField>> Class::GetIFieldsUnchecked() {
+  return MakeIterationRangeFromLengthPrefixedArray(GetIFieldsPtrUnchecked());
+}
+
+inline IterationRange<StrideIterator<ArtField>> Class::GetSFieldsUnchecked() {
+  return MakeIterationRangeFromLengthPrefixedArray(GetSFieldsPtrUnchecked());
 }
 
 inline MemberOffset Class::EmbeddedImTableOffset(size_t pointer_size) {
@@ -904,6 +888,104 @@ inline MemberOffset Class::EmbeddedVTableOffset(size_t pointer_size) {
 inline void Class::CheckPointerSize(size_t pointer_size) {
   DCHECK(ValidPointerSize(pointer_size)) << pointer_size;
   DCHECK_EQ(pointer_size, Runtime::Current()->GetClassLinker()->GetImagePointerSize());
+}
+
+template<VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
+inline Class* Class::GetComponentType() {
+  return GetFieldObject<Class, kVerifyFlags, kReadBarrierOption>(ComponentTypeOffset());
+}
+
+template<VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
+inline bool Class::IsArrayClass() {
+  return GetComponentType<kVerifyFlags, kReadBarrierOption>() != nullptr;
+}
+
+inline bool Class::IsAssignableFrom(Class* src) {
+  DCHECK(src != nullptr);
+  if (this == src) {
+    // Can always assign to things of the same type.
+    return true;
+  } else if (IsObjectClass()) {
+    // Can assign any reference to java.lang.Object.
+    return !src->IsPrimitive();
+  } else if (IsInterface()) {
+    return src->Implements(this);
+  } else if (src->IsArrayClass()) {
+    return IsAssignableFromArray(src);
+  } else {
+    return !src->IsInterface() && src->IsSubClass(this);
+  }
+}
+
+inline uint32_t Class::NumDirectMethods() {
+  LengthPrefixedArray<ArtMethod>* arr = GetDirectMethodsPtrUnchecked();
+  return arr != nullptr ? arr->size() : 0u;
+}
+
+inline uint32_t Class::NumVirtualMethods() {
+  LengthPrefixedArray<ArtMethod>* arr = GetVirtualMethodsPtrUnchecked();
+  return arr != nullptr ? arr->size() : 0u;
+}
+
+inline uint32_t Class::NumInstanceFields() {
+  LengthPrefixedArray<ArtField>* arr = GetIFieldsPtrUnchecked();
+  return arr != nullptr ? arr->size() : 0u;
+}
+
+inline uint32_t Class::NumStaticFields() {
+  LengthPrefixedArray<ArtField>* arr = GetSFieldsPtrUnchecked();
+  return arr != nullptr ? arr->size() : 0u;
+}
+
+template <typename Visitor>
+inline void Class::FixupNativePointers(mirror::Class* dest,
+                                       size_t pointer_size,
+                                       const Visitor& visitor) {
+  // Update the field arrays.
+  LengthPrefixedArray<ArtField>* const sfields = GetSFieldsPtr();
+  LengthPrefixedArray<ArtField>* const new_sfields = visitor(sfields);
+  if (sfields != new_sfields) {
+    dest->SetSFieldsPtrUnchecked(new_sfields);
+  }
+  LengthPrefixedArray<ArtField>* const ifields = GetIFieldsPtr();
+  LengthPrefixedArray<ArtField>* const new_ifields = visitor(ifields);
+  if (ifields != new_ifields) {
+    dest->SetIFieldsPtrUnchecked(new_ifields);
+  }
+  // Update direct and virtual method arrays.
+  LengthPrefixedArray<ArtMethod>* direct_methods = GetDirectMethodsPtr();
+  LengthPrefixedArray<ArtMethod>* new_direct_methods = visitor(direct_methods);
+  if (direct_methods != new_direct_methods) {
+    dest->SetDirectMethodsPtrUnchecked(new_direct_methods);
+  }
+  LengthPrefixedArray<ArtMethod>* virtual_methods = GetVirtualMethodsPtr();
+  LengthPrefixedArray<ArtMethod>* new_virtual_methods = visitor(virtual_methods);
+  if (virtual_methods != new_virtual_methods) {
+    dest->SetVirtualMethodsPtr(new_virtual_methods);
+  }
+  // Update dex cache strings.
+  GcRoot<mirror::String>* strings = GetDexCacheStrings();
+  GcRoot<mirror::String>* new_strings = visitor(strings);
+  if (strings != new_strings) {
+    dest->SetDexCacheStrings(new_strings);
+  }
+  // Fix up embedded tables.
+  if (!IsTemp() && ShouldHaveEmbeddedImtAndVTable()) {
+    for (int32_t i = 0, count = GetEmbeddedVTableLength(); i < count; ++i) {
+      ArtMethod* method = GetEmbeddedVTableEntry(i, pointer_size);
+      ArtMethod* new_method = visitor(method);
+      if (method != new_method) {
+        dest->SetEmbeddedVTableEntryUnchecked(i, new_method, pointer_size);
+      }
+    }
+    for (size_t i = 0; i < mirror::Class::kImtSize; ++i) {
+      ArtMethod* method = GetEmbeddedImTableEntry(i, pointer_size);
+      ArtMethod* new_method = visitor(method);
+      if (method != new_method) {
+        dest->SetEmbeddedImTableEntry(i, new_method, pointer_size);
+      }
+    }
+  }
 }
 
 }  // namespace mirror

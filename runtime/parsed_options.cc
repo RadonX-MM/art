@@ -152,12 +152,21 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
           .WithType<bool>()
           .WithValueMap({{"false", false}, {"true", true}})
           .IntoKey(M::UseJIT)
-      .Define("-Xjitcodecachesize:_")
+      .Define("-Xjitinitialsize:_")
           .WithType<MemoryKiB>()
-          .IntoKey(M::JITCodeCacheCapacity)
+          .IntoKey(M::JITCodeCacheInitialCapacity)
+      .Define("-Xjitmaxsize:_")
+          .WithType<MemoryKiB>()
+          .IntoKey(M::JITCodeCacheMaxCapacity)
       .Define("-Xjitthreshold:_")
           .WithType<unsigned int>()
           .IntoKey(M::JITCompileThreshold)
+      .Define("-Xjitwarmupthreshold:_")
+          .WithType<unsigned int>()
+          .IntoKey(M::JITWarmupThreshold)
+      .Define("-Xjitsaveprofilinginfo")
+          .WithValue(true)
+          .IntoKey(M::JITSaveProfilingInfo)
       .Define("-XX:HspaceCompactForOOMMinIntervalMs=_")  // in ms
           .WithType<MillisecondsToNanoseconds>()  // store as ns
           .IntoKey(M::HSpaceCompactForOOMMinIntervalsMs)
@@ -244,10 +253,11 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
           .AppendValues()
           .IntoKey(M::ImageCompilerOptions)
       .Define("-Xverify:_")
-          .WithType<bool>()
-          .WithValueMap({{"none", false},
-                         {"remote", true},
-                         {"all", true}})
+          .WithType<verifier::VerifyMode>()
+          .WithValueMap({{"none",     verifier::VerifyMode::kNone},
+                         {"remote",   verifier::VerifyMode::kEnable},
+                         {"all",      verifier::VerifyMode::kEnable},
+                         {"softfail", verifier::VerifyMode::kSoftFail}})
           .IntoKey(M::Verify)
       .Define("-XX:NativeBridge=_")
           .WithType<std::string>()
@@ -257,12 +267,18 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
           .IntoKey(M::ZygoteMaxFailedBoots)
       .Define("-Xno-dex-file-fallback")
           .IntoKey(M::NoDexFileFallback)
+      .Define("-Xno-sig-chain")
+          .IntoKey(M::NoSigChain)
       .Define("--cpu-abilist=_")
           .WithType<std::string>()
           .IntoKey(M::CpuAbiList)
       .Define("-Xfingerprint:_")
           .WithType<std::string>()
           .IntoKey(M::Fingerprint)
+      .Define("-Xexperimental:_")
+          .WithType<ExperimentalFlags>()
+          .AppendValues()
+          .IntoKey(M::Experimental)
       .Ignore({
           "-ea", "-da", "-enableassertions", "-disableassertions", "--runtime-arg", "-esa",
           "-dsa", "-enablesystemassertions", "-disablesystemassertions", "-Xrs", "-Xint:_",
@@ -371,23 +387,28 @@ bool ParsedOptions::ProcessSpecialOptions(const RuntimeOptions& options,
   return true;
 }
 
-bool ParsedOptions::Parse(const RuntimeOptions& options, bool ignore_unrecognized,
-                          RuntimeArgumentMap* runtime_options) {
+// Intended for local changes only.
+static void MaybeOverrideVerbosity() {
   //  gLogVerbosity.class_linker = true;  // TODO: don't check this in!
   //  gLogVerbosity.compiler = true;  // TODO: don't check this in!
+  //  gLogVerbosity.deopt = true;  // TODO: don't check this in!
   //  gLogVerbosity.gc = true;  // TODO: don't check this in!
   //  gLogVerbosity.heap = true;  // TODO: don't check this in!
   //  gLogVerbosity.jdwp = true;  // TODO: don't check this in!
   //  gLogVerbosity.jit = true;  // TODO: don't check this in!
   //  gLogVerbosity.jni = true;  // TODO: don't check this in!
   //  gLogVerbosity.monitor = true;  // TODO: don't check this in!
+  //  gLogVerbosity.oat = true;  // TODO: don't check this in!
   //  gLogVerbosity.profiler = true;  // TODO: don't check this in!
   //  gLogVerbosity.signals = true;  // TODO: don't check this in!
   //  gLogVerbosity.startup = true;  // TODO: don't check this in!
   //  gLogVerbosity.third_party_jni = true;  // TODO: don't check this in!
   //  gLogVerbosity.threads = true;  // TODO: don't check this in!
   //  gLogVerbosity.verifier = true;  // TODO: don't check this in!
+}
 
+bool ParsedOptions::Parse(const RuntimeOptions& options, bool ignore_unrecognized,
+                          RuntimeArgumentMap* runtime_options) {
   for (size_t i = 0; i < options.size(); ++i) {
     if (true && options[0].first == "-Xzygote") {
       LOG(INFO) << "option[" << i << "]=" << options[i].first;
@@ -455,6 +476,8 @@ bool ParsedOptions::Parse(const RuntimeOptions& options, bool ignore_unrecognize
       gLogVerbosity = *log_verbosity;
     }
   }
+
+  MaybeOverrideVerbosity();
 
   // -Xprofile:
   Trace::SetDefaultClockSource(args.GetOrDefault(M::ProfileClock));
@@ -536,8 +559,23 @@ bool ParsedOptions::Parse(const RuntimeOptions& options, bool ignore_unrecognize
     args.Set(M::Image, image);
   }
 
-  if (args.GetOrDefault(M::HeapGrowthLimit) == 0u) {  // 0 means no growth limit
+  // 0 means no growth limit, and growth limit should be always <= heap size
+  if (args.GetOrDefault(M::HeapGrowthLimit) <= 0u ||
+      args.GetOrDefault(M::HeapGrowthLimit) > args.GetOrDefault(M::MemoryMaximumSize)) {
     args.Set(M::HeapGrowthLimit, args.GetOrDefault(M::MemoryMaximumSize));
+  }
+
+  if (args.GetOrDefault(M::Experimental) & ExperimentalFlags::kDefaultMethods) {
+    LOG(WARNING) << "Default method support has been enabled. The verifier will be less strict "
+                 << "in some cases. All existing invoke opcodes have an unstable updated "
+                 << "specification and are nearly guaranteed to change over time. Do not attempt "
+                 << "to write shipping code against the invoke opcodes with this flag.";
+  }
+
+  if (args.GetOrDefault(M::Experimental) & ExperimentalFlags::kLambdas) {
+    LOG(WARNING) << "Experimental lambdas have been enabled. All lambda opcodes have "
+                 << "an unstable specification and are nearly guaranteed to change over time. "
+                 << "Do not attempt to write shipping code against these opcodes.";
   }
 
   *runtime_options = std::move(args);
@@ -610,7 +648,6 @@ void ParsedOptions::Usage(const char* fmt, ...) {
   UsageMessage(stream, "  -XX:ForegroundHeapGrowthMultiplier=doublevalue\n");
   UsageMessage(stream, "  -XX:LowMemoryMode\n");
   UsageMessage(stream, "  -Xprofile:{threadcpuclock,wallclock,dualclock}\n");
-  UsageMessage(stream, "  -Xjitcodecachesize:N\n");
   UsageMessage(stream, "  -Xjitthreshold:integervalue\n");
   UsageMessage(stream, "\n");
 
@@ -654,11 +691,15 @@ void ParsedOptions::Usage(const char* fmt, ...) {
   UsageMessage(stream, "  -Ximage-compiler-option dex2oat-option\n");
   UsageMessage(stream, "  -Xpatchoat:filename\n");
   UsageMessage(stream, "  -Xusejit:booleanvalue\n");
+  UsageMessage(stream, "  -Xjitinitialsize:N\n");
+  UsageMessage(stream, "  -Xjitmaxsize:N\n");
   UsageMessage(stream, "  -X[no]relocate\n");
   UsageMessage(stream, "  -X[no]dex2oat (Whether to invoke dex2oat on the application)\n");
   UsageMessage(stream, "  -X[no]image-dex2oat (Whether to create and use a boot image)\n");
   UsageMessage(stream, "  -Xno-dex-file-fallback "
                        "(Don't fall back to dex files without oat files)\n");
+  UsageMessage(stream, "  -Xexperimental:{lambdas,default-methods} "
+                       "(Enable new experimental dalvik opcodes and semantics, off by default)\n");
   UsageMessage(stream, "\n");
 
   UsageMessage(stream, "The following previously supported Dalvik options are ignored:\n");
@@ -668,7 +709,7 @@ void ParsedOptions::Usage(const char* fmt, ...) {
   UsageMessage(stream, "  -esa\n");
   UsageMessage(stream, "  -dsa\n");
   UsageMessage(stream, "   (-enablesystemassertions, -disablesystemassertions)\n");
-  UsageMessage(stream, "  -Xverify:{none,remote,all}\n");
+  UsageMessage(stream, "  -Xverify:{none,remote,all,softfail}\n");
   UsageMessage(stream, "  -Xrs\n");
   UsageMessage(stream, "  -Xint:portable, -Xint:fast, -Xint:jit\n");
   UsageMessage(stream, "  -Xdexopt:{none,verified,all,full}\n");
@@ -686,6 +727,7 @@ void ParsedOptions::Usage(const char* fmt, ...) {
   UsageMessage(stream, "  -Xjitblocking\n");
   UsageMessage(stream, "  -Xjitmethod:signature[,signature]* (eg Ljava/lang/String\\;replace)\n");
   UsageMessage(stream, "  -Xjitclass:classname[,classname]*\n");
+  UsageMessage(stream, "  -Xjitcodecachesize:N\n");
   UsageMessage(stream, "  -Xjitoffset:offset[,offset]\n");
   UsageMessage(stream, "  -Xjitconfig:filename\n");
   UsageMessage(stream, "  -Xjitcheckcg\n");

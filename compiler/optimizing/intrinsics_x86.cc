@@ -20,9 +20,11 @@
 
 #include "arch/x86/instruction_set_features_x86.h"
 #include "art_method.h"
+#include "base/bit_utils.h"
 #include "code_generator_x86.h"
 #include "entrypoints/quick/quick_entrypoints.h"
 #include "intrinsics.h"
+#include "intrinsics_utils.h"
 #include "mirror/array-inl.h"
 #include "mirror/string.h"
 #include "thread.h"
@@ -43,7 +45,7 @@ IntrinsicLocationsBuilderX86::IntrinsicLocationsBuilderX86(CodeGeneratorX86* cod
 
 
 X86Assembler* IntrinsicCodeGeneratorX86::GetAssembler() {
-  return reinterpret_cast<X86Assembler*>(codegen_->GetAssembler());
+  return down_cast<X86Assembler*>(codegen_->GetAssembler());
 }
 
 ArenaAllocator* IntrinsicCodeGeneratorX86::GetAllocator() {
@@ -53,64 +55,23 @@ ArenaAllocator* IntrinsicCodeGeneratorX86::GetAllocator() {
 bool IntrinsicLocationsBuilderX86::TryDispatch(HInvoke* invoke) {
   Dispatch(invoke);
   LocationSummary* res = invoke->GetLocations();
-  return res != nullptr && res->Intrinsified();
-}
-
-#define __ reinterpret_cast<X86Assembler*>(codegen->GetAssembler())->
-
-// TODO: target as memory.
-static void MoveFromReturnRegister(Location target,
-                                   Primitive::Type type,
-                                   CodeGeneratorX86* codegen) {
-  if (!target.IsValid()) {
-    DCHECK(type == Primitive::kPrimVoid);
-    return;
+  if (res == nullptr) {
+    return false;
   }
-
-  switch (type) {
-    case Primitive::kPrimBoolean:
-    case Primitive::kPrimByte:
-    case Primitive::kPrimChar:
-    case Primitive::kPrimShort:
-    case Primitive::kPrimInt:
-    case Primitive::kPrimNot: {
-      Register target_reg = target.AsRegister<Register>();
-      if (target_reg != EAX) {
-        __ movl(target_reg, EAX);
-      }
-      break;
-    }
-    case Primitive::kPrimLong: {
-      Register target_reg_lo = target.AsRegisterPairLow<Register>();
-      Register target_reg_hi = target.AsRegisterPairHigh<Register>();
-      if (target_reg_lo != EAX) {
-        __ movl(target_reg_lo, EAX);
-      }
-      if (target_reg_hi != EDX) {
-        __ movl(target_reg_hi, EDX);
-      }
-      break;
-    }
-
-    case Primitive::kPrimVoid:
-      LOG(FATAL) << "Unexpected void type for valid location " << target;
-      UNREACHABLE();
-
-    case Primitive::kPrimDouble: {
-      XmmRegister target_reg = target.AsFpuRegister<XmmRegister>();
-      if (target_reg != XMM0) {
-        __ movsd(target_reg, XMM0);
-      }
-      break;
-    }
-    case Primitive::kPrimFloat: {
-      XmmRegister target_reg = target.AsFpuRegister<XmmRegister>();
-      if (target_reg != XMM0) {
-        __ movss(target_reg, XMM0);
-      }
-      break;
-    }
+  if (kEmitCompilerReadBarrier && res->CanCall()) {
+    // Generating an intrinsic for this HInvoke may produce an
+    // IntrinsicSlowPathX86 slow path.  Currently this approach
+    // does not work when using read barriers, as the emitted
+    // calling sequence will make use of another slow path
+    // (ReadBarrierForRootSlowPathX86 for HInvokeStaticOrDirect,
+    // ReadBarrierSlowPathX86 for HInvokeVirtual).  So we bail
+    // out in this case.
+    //
+    // TODO: Find a way to have intrinsics work with read barriers.
+    invoke->SetLocations(nullptr);
+    return false;
   }
+  return res->Intrinsified();
 }
 
 static void MoveArguments(HInvoke* invoke, CodeGeneratorX86* codegen) {
@@ -118,53 +79,8 @@ static void MoveArguments(HInvoke* invoke, CodeGeneratorX86* codegen) {
   IntrinsicVisitor::MoveArguments(invoke, codegen, &calling_convention_visitor);
 }
 
-// Slow-path for fallback (calling the managed code to handle the intrinsic) in an intrinsified
-// call. This will copy the arguments into the positions for a regular call.
-//
-// Note: The actual parameters are required to be in the locations given by the invoke's location
-//       summary. If an intrinsic modifies those locations before a slowpath call, they must be
-//       restored!
-class IntrinsicSlowPathX86 : public SlowPathCodeX86 {
- public:
-  explicit IntrinsicSlowPathX86(HInvoke* invoke)
-    : invoke_(invoke) { }
+using IntrinsicSlowPathX86 = IntrinsicSlowPath<InvokeDexCallingConventionVisitorX86>;
 
-  void EmitNativeCode(CodeGenerator* codegen_in) OVERRIDE {
-    CodeGeneratorX86* codegen = down_cast<CodeGeneratorX86*>(codegen_in);
-    __ Bind(GetEntryLabel());
-
-    SaveLiveRegisters(codegen, invoke_->GetLocations());
-
-    MoveArguments(invoke_, codegen);
-
-    if (invoke_->IsInvokeStaticOrDirect()) {
-      codegen->GenerateStaticOrDirectCall(invoke_->AsInvokeStaticOrDirect(), EAX);
-      RecordPcInfo(codegen, invoke_, invoke_->GetDexPc());
-    } else {
-      UNIMPLEMENTED(FATAL) << "Non-direct intrinsic slow-path not yet implemented";
-      UNREACHABLE();
-    }
-
-    // Copy the result back to the expected output.
-    Location out = invoke_->GetLocations()->Out();
-    if (out.IsValid()) {
-      DCHECK(out.IsRegister());  // TODO: Replace this when we support output in memory.
-      DCHECK(!invoke_->GetLocations()->GetLiveRegisters()->ContainsCoreRegister(out.reg()));
-      MoveFromReturnRegister(out, invoke_->GetType(), codegen);
-    }
-
-    RestoreLiveRegisters(codegen, invoke_->GetLocations());
-    __ jmp(GetExitLabel());
-  }
-
- private:
-  // The instruction where this slow path is happening.
-  HInvoke* const invoke_;
-
-  DISALLOW_COPY_AND_ASSIGN(IntrinsicSlowPathX86);
-};
-
-#undef __
 #define __ assembler->
 
 static void CreateFPToIntLocations(ArenaAllocator* arena, HInvoke* invoke, bool is64bit) {
@@ -504,7 +420,7 @@ static void GenMinMaxFP(LocationSummary* locations, bool is_min, bool is_double,
 
   XmmRegister op2 = op2_loc.AsFpuRegister<XmmRegister>();
 
-  Label nan, done, op2_label;
+  NearLabel nan, done, op2_label;
   if (is_double) {
     __ ucomisd(out, op2);
   } else {
@@ -732,14 +648,15 @@ static void InvokeOutOfLineIntrinsic(CodeGeneratorX86* codegen, HInvoke* invoke)
   MoveArguments(invoke, codegen);
 
   DCHECK(invoke->IsInvokeStaticOrDirect());
-  codegen->GenerateStaticOrDirectCall(invoke->AsInvokeStaticOrDirect(), EAX);
+  codegen->GenerateStaticOrDirectCall(invoke->AsInvokeStaticOrDirect(),
+                                      Location::RegisterLocation(EAX));
   codegen->RecordPcInfo(invoke, invoke->GetDexPc());
 
   // Copy the result back to the expected output.
   Location out = invoke->GetLocations()->Out();
   if (out.IsValid()) {
     DCHECK(out.IsRegister());
-    MoveFromReturnRegister(out, invoke->GetType(), codegen);
+    codegen->MoveFromReturnRegister(out, invoke->GetType());
   }
 }
 
@@ -837,7 +754,7 @@ void IntrinsicCodeGeneratorX86::VisitMathRoundFloat(HInvoke* invoke) {
   Register out = locations->Out().AsRegister<Register>();
   XmmRegister maxInt = locations->GetTemp(0).AsFpuRegister<XmmRegister>();
   XmmRegister inPlusPointFive = locations->GetTemp(1).AsFpuRegister<XmmRegister>();
-  Label done, nan;
+  NearLabel done, nan;
   X86Assembler* assembler = GetAssembler();
 
   // Generate 0.5 into inPlusPointFive.
@@ -884,9 +801,9 @@ void IntrinsicLocationsBuilderX86::VisitStringCharAt(HInvoke* invoke) {
 void IntrinsicCodeGeneratorX86::VisitStringCharAt(HInvoke* invoke) {
   LocationSummary* locations = invoke->GetLocations();
 
-  // Location of reference to data array
+  // Location of reference to data array.
   const int32_t value_offset = mirror::String::ValueOffset().Int32Value();
-  // Location of count
+  // Location of count.
   const int32_t count_offset = mirror::String::CountOffset().Int32Value();
 
   Register obj = locations->InAt(0).AsRegister<Register>();
@@ -898,7 +815,7 @@ void IntrinsicCodeGeneratorX86::VisitStringCharAt(HInvoke* invoke) {
   // TODO: For simplicity, the index parameter is requested in a register, so different from Quick
   //       we will not optimize the code for constants (which would save a register).
 
-  SlowPathCodeX86* slow_path = new (GetAllocator()) IntrinsicSlowPathX86(invoke);
+  SlowPathCode* slow_path = new (GetAllocator()) IntrinsicSlowPathX86(invoke);
   codegen_->AddSlowPath(slow_path);
 
   X86Assembler* assembler = GetAssembler();
@@ -909,6 +826,183 @@ void IntrinsicCodeGeneratorX86::VisitStringCharAt(HInvoke* invoke) {
 
   // out = out[2*idx].
   __ movzxw(out, Address(out, idx, ScaleFactor::TIMES_2, value_offset));
+
+  __ Bind(slow_path->GetExitLabel());
+}
+
+void IntrinsicLocationsBuilderX86::VisitSystemArrayCopyChar(HInvoke* invoke) {
+  // We need at least two of the positions or length to be an integer constant,
+  // or else we won't have enough free registers.
+  HIntConstant* src_pos = invoke->InputAt(1)->AsIntConstant();
+  HIntConstant* dest_pos = invoke->InputAt(3)->AsIntConstant();
+  HIntConstant* length = invoke->InputAt(4)->AsIntConstant();
+
+  int num_constants =
+      ((src_pos != nullptr) ? 1 : 0)
+      + ((dest_pos != nullptr) ? 1 : 0)
+      + ((length != nullptr) ? 1 : 0);
+
+  if (num_constants < 2) {
+    // Not enough free registers.
+    return;
+  }
+
+  // As long as we are checking, we might as well check to see if the src and dest
+  // positions are >= 0.
+  if ((src_pos != nullptr && src_pos->GetValue() < 0) ||
+      (dest_pos != nullptr && dest_pos->GetValue() < 0)) {
+    // We will have to fail anyways.
+    return;
+  }
+
+  // And since we are already checking, check the length too.
+  if (length != nullptr) {
+    int32_t len = length->GetValue();
+    if (len < 0) {
+      // Just call as normal.
+      return;
+    }
+  }
+
+  // Okay, it is safe to generate inline code.
+  LocationSummary* locations =
+    new (arena_) LocationSummary(invoke, LocationSummary::kCallOnSlowPath, kIntrinsified);
+  // arraycopy(Object src, int srcPos, Object dest, int destPos, int length).
+  locations->SetInAt(0, Location::RequiresRegister());
+  locations->SetInAt(1, Location::RegisterOrConstant(invoke->InputAt(1)));
+  locations->SetInAt(2, Location::RequiresRegister());
+  locations->SetInAt(3, Location::RegisterOrConstant(invoke->InputAt(3)));
+  locations->SetInAt(4, Location::RegisterOrConstant(invoke->InputAt(4)));
+
+  // And we need some temporaries.  We will use REP MOVSW, so we need fixed registers.
+  locations->AddTemp(Location::RegisterLocation(ESI));
+  locations->AddTemp(Location::RegisterLocation(EDI));
+  locations->AddTemp(Location::RegisterLocation(ECX));
+}
+
+static void CheckPosition(X86Assembler* assembler,
+                          Location pos,
+                          Register input,
+                          Register length,
+                          SlowPathCode* slow_path,
+                          Register input_len,
+                          Register temp) {
+  // Where is the length in the String?
+  const uint32_t length_offset = mirror::Array::LengthOffset().Uint32Value();
+
+  if (pos.IsConstant()) {
+    int32_t pos_const = pos.GetConstant()->AsIntConstant()->GetValue();
+    if (pos_const == 0) {
+      // Check that length(input) >= length.
+      __ cmpl(Address(input, length_offset), length);
+      __ j(kLess, slow_path->GetEntryLabel());
+    } else {
+      // Check that length(input) >= pos.
+      __ movl(input_len, Address(input, length_offset));
+      __ cmpl(input_len, Immediate(pos_const));
+      __ j(kLess, slow_path->GetEntryLabel());
+
+      // Check that (length(input) - pos) >= length.
+      __ leal(temp, Address(input_len, -pos_const));
+      __ cmpl(temp, length);
+      __ j(kLess, slow_path->GetEntryLabel());
+    }
+  } else {
+    // Check that pos >= 0.
+    Register pos_reg = pos.AsRegister<Register>();
+    __ testl(pos_reg, pos_reg);
+    __ j(kLess, slow_path->GetEntryLabel());
+
+    // Check that pos <= length(input).
+    __ cmpl(Address(input, length_offset), pos_reg);
+    __ j(kLess, slow_path->GetEntryLabel());
+
+    // Check that (length(input) - pos) >= length.
+    __ movl(temp, Address(input, length_offset));
+    __ subl(temp, pos_reg);
+    __ cmpl(temp, length);
+    __ j(kLess, slow_path->GetEntryLabel());
+  }
+}
+
+void IntrinsicCodeGeneratorX86::VisitSystemArrayCopyChar(HInvoke* invoke) {
+  X86Assembler* assembler = GetAssembler();
+  LocationSummary* locations = invoke->GetLocations();
+
+  Register src = locations->InAt(0).AsRegister<Register>();
+  Location srcPos = locations->InAt(1);
+  Register dest = locations->InAt(2).AsRegister<Register>();
+  Location destPos = locations->InAt(3);
+  Location length = locations->InAt(4);
+
+  // Temporaries that we need for MOVSW.
+  Register src_base = locations->GetTemp(0).AsRegister<Register>();
+  DCHECK_EQ(src_base, ESI);
+  Register dest_base = locations->GetTemp(1).AsRegister<Register>();
+  DCHECK_EQ(dest_base, EDI);
+  Register count = locations->GetTemp(2).AsRegister<Register>();
+  DCHECK_EQ(count, ECX);
+
+  SlowPathCode* slow_path = new (GetAllocator()) IntrinsicSlowPathX86(invoke);
+  codegen_->AddSlowPath(slow_path);
+
+  // Bail out if the source and destination are the same (to handle overlap).
+  __ cmpl(src, dest);
+  __ j(kEqual, slow_path->GetEntryLabel());
+
+  // Bail out if the source is null.
+  __ testl(src, src);
+  __ j(kEqual, slow_path->GetEntryLabel());
+
+  // Bail out if the destination is null.
+  __ testl(dest, dest);
+  __ j(kEqual, slow_path->GetEntryLabel());
+
+  // If the length is negative, bail out.
+  // We have already checked in the LocationsBuilder for the constant case.
+  if (!length.IsConstant()) {
+    __ cmpl(length.AsRegister<Register>(), length.AsRegister<Register>());
+    __ j(kLess, slow_path->GetEntryLabel());
+  }
+
+  // We need the count in ECX.
+  if (length.IsConstant()) {
+    __ movl(count, Immediate(length.GetConstant()->AsIntConstant()->GetValue()));
+  } else {
+    __ movl(count, length.AsRegister<Register>());
+  }
+
+  // Validity checks: source.
+  CheckPosition(assembler, srcPos, src, count, slow_path, src_base, dest_base);
+
+  // Validity checks: dest.
+  CheckPosition(assembler, destPos, dest, count, slow_path, src_base, dest_base);
+
+  // Okay, everything checks out.  Finally time to do the copy.
+  // Check assumption that sizeof(Char) is 2 (used in scaling below).
+  const size_t char_size = Primitive::ComponentSize(Primitive::kPrimChar);
+  DCHECK_EQ(char_size, 2u);
+
+  const uint32_t data_offset = mirror::Array::DataOffset(char_size).Uint32Value();
+
+  if (srcPos.IsConstant()) {
+    int32_t srcPos_const = srcPos.GetConstant()->AsIntConstant()->GetValue();
+    __ leal(src_base, Address(src, char_size * srcPos_const + data_offset));
+  } else {
+    __ leal(src_base, Address(src, srcPos.AsRegister<Register>(),
+                              ScaleFactor::TIMES_2, data_offset));
+  }
+  if (destPos.IsConstant()) {
+    int32_t destPos_const = destPos.GetConstant()->AsIntConstant()->GetValue();
+
+    __ leal(dest_base, Address(dest, char_size * destPos_const + data_offset));
+  } else {
+    __ leal(dest_base, Address(dest, destPos.AsRegister<Register>(),
+                               ScaleFactor::TIMES_2, data_offset));
+  }
+
+  // Do the move.
+  __ rep_movsw();
 
   __ Bind(slow_path->GetExitLabel());
 }
@@ -933,12 +1027,105 @@ void IntrinsicCodeGeneratorX86::VisitStringCompareTo(HInvoke* invoke) {
 
   Register argument = locations->InAt(1).AsRegister<Register>();
   __ testl(argument, argument);
-  SlowPathCodeX86* slow_path = new (GetAllocator()) IntrinsicSlowPathX86(invoke);
+  SlowPathCode* slow_path = new (GetAllocator()) IntrinsicSlowPathX86(invoke);
   codegen_->AddSlowPath(slow_path);
   __ j(kEqual, slow_path->GetEntryLabel());
 
   __ fs()->call(Address::Absolute(QUICK_ENTRYPOINT_OFFSET(kX86WordSize, pStringCompareTo)));
   __ Bind(slow_path->GetExitLabel());
+}
+
+void IntrinsicLocationsBuilderX86::VisitStringEquals(HInvoke* invoke) {
+  LocationSummary* locations = new (arena_) LocationSummary(invoke,
+                                                            LocationSummary::kNoCall,
+                                                            kIntrinsified);
+  locations->SetInAt(0, Location::RequiresRegister());
+  locations->SetInAt(1, Location::RequiresRegister());
+
+  // Request temporary registers, ECX and EDI needed for repe_cmpsl instruction.
+  locations->AddTemp(Location::RegisterLocation(ECX));
+  locations->AddTemp(Location::RegisterLocation(EDI));
+
+  // Set output, ESI needed for repe_cmpsl instruction anyways.
+  locations->SetOut(Location::RegisterLocation(ESI), Location::kOutputOverlap);
+}
+
+void IntrinsicCodeGeneratorX86::VisitStringEquals(HInvoke* invoke) {
+  X86Assembler* assembler = GetAssembler();
+  LocationSummary* locations = invoke->GetLocations();
+
+  Register str = locations->InAt(0).AsRegister<Register>();
+  Register arg = locations->InAt(1).AsRegister<Register>();
+  Register ecx = locations->GetTemp(0).AsRegister<Register>();
+  Register edi = locations->GetTemp(1).AsRegister<Register>();
+  Register esi = locations->Out().AsRegister<Register>();
+
+  NearLabel end, return_true, return_false;
+
+  // Get offsets of count, value, and class fields within a string object.
+  const uint32_t count_offset = mirror::String::CountOffset().Uint32Value();
+  const uint32_t value_offset = mirror::String::ValueOffset().Uint32Value();
+  const uint32_t class_offset = mirror::Object::ClassOffset().Uint32Value();
+
+  // Note that the null check must have been done earlier.
+  DCHECK(!invoke->CanDoImplicitNullCheckOn(invoke->InputAt(0)));
+
+  StringEqualsOptimizations optimizations(invoke);
+  if (!optimizations.GetArgumentNotNull()) {
+    // Check if input is null, return false if it is.
+    __ testl(arg, arg);
+    __ j(kEqual, &return_false);
+  }
+
+  // Instanceof check for the argument by comparing class fields.
+  // All string objects must have the same type since String cannot be subclassed.
+  // Receiver must be a string object, so its class field is equal to all strings' class fields.
+  // If the argument is a string object, its class field must be equal to receiver's class field.
+  if (!optimizations.GetArgumentIsString()) {
+    __ movl(ecx, Address(str, class_offset));
+    __ cmpl(ecx, Address(arg, class_offset));
+    __ j(kNotEqual, &return_false);
+  }
+
+  // Reference equality check, return true if same reference.
+  __ cmpl(str, arg);
+  __ j(kEqual, &return_true);
+
+  // Load length of receiver string.
+  __ movl(ecx, Address(str, count_offset));
+  // Check if lengths are equal, return false if they're not.
+  __ cmpl(ecx, Address(arg, count_offset));
+  __ j(kNotEqual, &return_false);
+  // Return true if both strings are empty.
+  __ jecxz(&return_true);
+
+  // Load starting addresses of string values into ESI/EDI as required for repe_cmpsl instruction.
+  __ leal(esi, Address(str, value_offset));
+  __ leal(edi, Address(arg, value_offset));
+
+  // Divide string length by 2 to compare characters 2 at a time and adjust for odd lengths.
+  __ addl(ecx, Immediate(1));
+  __ shrl(ecx, Immediate(1));
+
+  // Assertions that must hold in order to compare strings 2 characters at a time.
+  DCHECK_ALIGNED(value_offset, 4);
+  static_assert(IsAligned<4>(kObjectAlignment), "String of odd length is not zero padded");
+
+  // Loop to compare strings two characters at a time starting at the beginning of the string.
+  __ repe_cmpsl();
+  // If strings are not equal, zero flag will be cleared.
+  __ j(kNotEqual, &return_false);
+
+  // Return true and exit the function.
+  // If loop does not result in returning false, we return true.
+  __ Bind(&return_true);
+  __ movl(esi, Immediate(1));
+  __ jmp(&end);
+
+  // Return false and exit the function.
+  __ Bind(&return_false);
+  __ xorl(esi, esi);
+  __ Bind(&end);
 }
 
 static void CreateStringIndexOfLocations(HInvoke* invoke,
@@ -990,7 +1177,7 @@ static void GenerateStringIndexOf(HInvoke* invoke,
 
   // Check for code points > 0xFFFF. Either a slow-path check when we don't know statically,
   // or directly dispatch if we have a constant.
-  SlowPathCodeX86* slow_path = nullptr;
+  SlowPathCode* slow_path = nullptr;
   if (invoke->InputAt(1)->IsIntConstant()) {
     if (static_cast<uint32_t>(invoke->InputAt(1)->AsIntConstant()->GetValue()) >
     std::numeric_limits<uint16_t>::max()) {
@@ -1020,7 +1207,7 @@ static void GenerateStringIndexOf(HInvoke* invoke,
 
   // Do a zero-length check.
   // TODO: Support jecxz.
-  Label not_found_label;
+  NearLabel not_found_label;
   __ testl(string_length, string_length);
   __ j(kEqual, &not_found_label);
 
@@ -1063,7 +1250,7 @@ static void GenerateStringIndexOf(HInvoke* invoke,
   __ subl(string_length, counter);
   __ leal(out, Address(string_length, -1));
 
-  Label done;
+  NearLabel done;
   __ jmp(&done);
 
   // Failed to match; return -1.
@@ -1111,7 +1298,7 @@ void IntrinsicCodeGeneratorX86::VisitStringNewStringFromBytes(HInvoke* invoke) {
 
   Register byte_array = locations->InAt(0).AsRegister<Register>();
   __ testl(byte_array, byte_array);
-  SlowPathCodeX86* slow_path = new (GetAllocator()) IntrinsicSlowPathX86(invoke);
+  SlowPathCode* slow_path = new (GetAllocator()) IntrinsicSlowPathX86(invoke);
   codegen_->AddSlowPath(slow_path);
   __ j(kEqual, slow_path->GetEntryLabel());
 
@@ -1153,13 +1340,90 @@ void IntrinsicCodeGeneratorX86::VisitStringNewStringFromString(HInvoke* invoke) 
 
   Register string_to_copy = locations->InAt(0).AsRegister<Register>();
   __ testl(string_to_copy, string_to_copy);
-  SlowPathCodeX86* slow_path = new (GetAllocator()) IntrinsicSlowPathX86(invoke);
+  SlowPathCode* slow_path = new (GetAllocator()) IntrinsicSlowPathX86(invoke);
   codegen_->AddSlowPath(slow_path);
   __ j(kEqual, slow_path->GetEntryLabel());
 
   __ fs()->call(Address::Absolute(QUICK_ENTRYPOINT_OFFSET(kX86WordSize, pAllocStringFromString)));
   codegen_->RecordPcInfo(invoke, invoke->GetDexPc());
   __ Bind(slow_path->GetExitLabel());
+}
+
+void IntrinsicLocationsBuilderX86::VisitStringGetCharsNoCheck(HInvoke* invoke) {
+  // public void getChars(int srcBegin, int srcEnd, char[] dst, int dstBegin);
+  LocationSummary* locations = new (arena_) LocationSummary(invoke,
+                                                            LocationSummary::kNoCall,
+                                                            kIntrinsified);
+  locations->SetInAt(0, Location::RequiresRegister());
+  locations->SetInAt(1, Location::RegisterOrConstant(invoke->InputAt(1)));
+  // Place srcEnd in ECX to save a move below.
+  locations->SetInAt(2, Location::RegisterLocation(ECX));
+  locations->SetInAt(3, Location::RequiresRegister());
+  locations->SetInAt(4, Location::RequiresRegister());
+
+  // And we need some temporaries.  We will use REP MOVSW, so we need fixed registers.
+  // We don't have enough registers to also grab ECX, so handle below.
+  locations->AddTemp(Location::RegisterLocation(ESI));
+  locations->AddTemp(Location::RegisterLocation(EDI));
+}
+
+void IntrinsicCodeGeneratorX86::VisitStringGetCharsNoCheck(HInvoke* invoke) {
+  X86Assembler* assembler = GetAssembler();
+  LocationSummary* locations = invoke->GetLocations();
+
+  size_t char_component_size = Primitive::ComponentSize(Primitive::kPrimChar);
+  // Location of data in char array buffer.
+  const uint32_t data_offset = mirror::Array::DataOffset(char_component_size).Uint32Value();
+  // Location of char array data in string.
+  const uint32_t value_offset = mirror::String::ValueOffset().Uint32Value();
+
+  // public void getChars(int srcBegin, int srcEnd, char[] dst, int dstBegin);
+  Register obj = locations->InAt(0).AsRegister<Register>();
+  Location srcBegin = locations->InAt(1);
+  int srcBegin_value =
+    srcBegin.IsConstant() ? srcBegin.GetConstant()->AsIntConstant()->GetValue() : 0;
+  Register srcEnd = locations->InAt(2).AsRegister<Register>();
+  Register dst = locations->InAt(3).AsRegister<Register>();
+  Register dstBegin = locations->InAt(4).AsRegister<Register>();
+
+  // Check assumption that sizeof(Char) is 2 (used in scaling below).
+  const size_t char_size = Primitive::ComponentSize(Primitive::kPrimChar);
+  DCHECK_EQ(char_size, 2u);
+
+  // Compute the address of the destination buffer.
+  __ leal(EDI, Address(dst, dstBegin, ScaleFactor::TIMES_2, data_offset));
+
+  // Compute the address of the source string.
+  if (srcBegin.IsConstant()) {
+    // Compute the address of the source string by adding the number of chars from
+    // the source beginning to the value offset of a string.
+    __ leal(ESI, Address(obj, srcBegin_value * char_size + value_offset));
+  } else {
+    __ leal(ESI, Address(obj, srcBegin.AsRegister<Register>(),
+                         ScaleFactor::TIMES_2, value_offset));
+  }
+
+  // Compute the number of chars (words) to move.
+  // Now is the time to save ECX, since we don't know if it will be used later.
+  __ pushl(ECX);
+  int stack_adjust = kX86WordSize;
+  __ cfi().AdjustCFAOffset(stack_adjust);
+  DCHECK_EQ(srcEnd, ECX);
+  if (srcBegin.IsConstant()) {
+    if (srcBegin_value != 0) {
+      __ subl(ECX, Immediate(srcBegin_value));
+    }
+  } else {
+    DCHECK(srcBegin.IsRegister());
+    __ subl(ECX, srcBegin.AsRegister<Register>());
+  }
+
+  // Do the move.
+  __ rep_movsw();
+
+  // And restore ECX.
+  __ popl(ECX);
+  __ cfi().AdjustCFAOffset(-stack_adjust);
 }
 
 static void GenPeek(LocationSummary* locations, Primitive::Type size, X86Assembler* assembler) {
@@ -1323,21 +1587,32 @@ void IntrinsicCodeGeneratorX86::VisitThreadCurrentThread(HInvoke* invoke) {
   GetAssembler()->fs()->movl(out, Address::Absolute(Thread::PeerOffset<kX86WordSize>()));
 }
 
-static void GenUnsafeGet(LocationSummary* locations, Primitive::Type type,
-                         bool is_volatile, X86Assembler* assembler) {
-  Register base = locations->InAt(1).AsRegister<Register>();
-  Register offset = locations->InAt(2).AsRegisterPairLow<Register>();
-  Location output = locations->Out();
+static void GenUnsafeGet(HInvoke* invoke,
+                         Primitive::Type type,
+                         bool is_volatile,
+                         CodeGeneratorX86* codegen) {
+  X86Assembler* assembler = down_cast<X86Assembler*>(codegen->GetAssembler());
+  LocationSummary* locations = invoke->GetLocations();
+  Location base_loc = locations->InAt(1);
+  Register base = base_loc.AsRegister<Register>();
+  Location offset_loc = locations->InAt(2);
+  Register offset = offset_loc.AsRegisterPairLow<Register>();
+  Location output_loc = locations->Out();
 
   switch (type) {
     case Primitive::kPrimInt:
-    case Primitive::kPrimNot:
-      __ movl(output.AsRegister<Register>(), Address(base, offset, ScaleFactor::TIMES_1, 0));
+    case Primitive::kPrimNot: {
+      Register output = output_loc.AsRegister<Register>();
+      __ movl(output, Address(base, offset, ScaleFactor::TIMES_1, 0));
+      if (type == Primitive::kPrimNot) {
+        codegen->MaybeGenerateReadBarrier(invoke, output_loc, output_loc, base_loc, 0U, offset_loc);
+      }
       break;
+    }
 
     case Primitive::kPrimLong: {
-        Register output_lo = output.AsRegisterPairLow<Register>();
-        Register output_hi = output.AsRegisterPairHigh<Register>();
+        Register output_lo = output_loc.AsRegisterPairLow<Register>();
+        Register output_hi = output_loc.AsRegisterPairHigh<Register>();
         if (is_volatile) {
           // Need to use a XMM to read atomically.
           XmmRegister temp = locations->GetTemp(0).AsFpuRegister<XmmRegister>();
@@ -1360,8 +1635,13 @@ static void GenUnsafeGet(LocationSummary* locations, Primitive::Type type,
 
 static void CreateIntIntIntToIntLocations(ArenaAllocator* arena, HInvoke* invoke,
                                           bool is_long, bool is_volatile) {
+  bool can_call = kEmitCompilerReadBarrier &&
+      (invoke->GetIntrinsic() == Intrinsics::kUnsafeGetObject ||
+       invoke->GetIntrinsic() == Intrinsics::kUnsafeGetObjectVolatile);
   LocationSummary* locations = new (arena) LocationSummary(invoke,
-                                                           LocationSummary::kNoCall,
+                                                           can_call ?
+                                                               LocationSummary::kCallOnSlowPath :
+                                                               LocationSummary::kNoCall,
                                                            kIntrinsified);
   locations->SetInAt(0, Location::NoLocation());        // Unused receiver.
   locations->SetInAt(1, Location::RequiresRegister());
@@ -1400,22 +1680,22 @@ void IntrinsicLocationsBuilderX86::VisitUnsafeGetObjectVolatile(HInvoke* invoke)
 
 
 void IntrinsicCodeGeneratorX86::VisitUnsafeGet(HInvoke* invoke) {
-  GenUnsafeGet(invoke->GetLocations(), Primitive::kPrimInt, false, GetAssembler());
+  GenUnsafeGet(invoke, Primitive::kPrimInt, false, codegen_);
 }
 void IntrinsicCodeGeneratorX86::VisitUnsafeGetVolatile(HInvoke* invoke) {
-  GenUnsafeGet(invoke->GetLocations(), Primitive::kPrimInt, true, GetAssembler());
+  GenUnsafeGet(invoke, Primitive::kPrimInt, true, codegen_);
 }
 void IntrinsicCodeGeneratorX86::VisitUnsafeGetLong(HInvoke* invoke) {
-  GenUnsafeGet(invoke->GetLocations(), Primitive::kPrimLong, false, GetAssembler());
+  GenUnsafeGet(invoke, Primitive::kPrimLong, false, codegen_);
 }
 void IntrinsicCodeGeneratorX86::VisitUnsafeGetLongVolatile(HInvoke* invoke) {
-  GenUnsafeGet(invoke->GetLocations(), Primitive::kPrimLong, true, GetAssembler());
+  GenUnsafeGet(invoke, Primitive::kPrimLong, true, codegen_);
 }
 void IntrinsicCodeGeneratorX86::VisitUnsafeGetObject(HInvoke* invoke) {
-  GenUnsafeGet(invoke->GetLocations(), Primitive::kPrimNot, false, GetAssembler());
+  GenUnsafeGet(invoke, Primitive::kPrimNot, false, codegen_);
 }
 void IntrinsicCodeGeneratorX86::VisitUnsafeGetObjectVolatile(HInvoke* invoke) {
-  GenUnsafeGet(invoke->GetLocations(), Primitive::kPrimNot, true, GetAssembler());
+  GenUnsafeGet(invoke, Primitive::kPrimNot, true, codegen_);
 }
 
 
@@ -1432,7 +1712,7 @@ static void CreateIntIntIntIntToVoidPlusTempsLocations(ArenaAllocator* arena,
   locations->SetInAt(3, Location::RequiresRegister());
   if (type == Primitive::kPrimNot) {
     // Need temp registers for card-marking.
-    locations->AddTemp(Location::RequiresRegister());
+    locations->AddTemp(Location::RequiresRegister());  // Possibly used for reference poisoning too.
     // Ensure the value is in a byte register.
     locations->AddTemp(Location::RegisterLocation(ECX));
   } else if (type == Primitive::kPrimLong && is_volatile) {
@@ -1475,7 +1755,7 @@ static void GenUnsafePut(LocationSummary* locations,
                          Primitive::Type type,
                          bool is_volatile,
                          CodeGeneratorX86* codegen) {
-  X86Assembler* assembler = reinterpret_cast<X86Assembler*>(codegen->GetAssembler());
+  X86Assembler* assembler = down_cast<X86Assembler*>(codegen->GetAssembler());
   Register base = locations->InAt(1).AsRegister<Register>();
   Register offset = locations->InAt(2).AsRegisterPairLow<Register>();
   Location value_loc = locations->InAt(3);
@@ -1494,6 +1774,11 @@ static void GenUnsafePut(LocationSummary* locations,
       __ movl(Address(base, offset, ScaleFactor::TIMES_1, 0), value_lo);
       __ movl(Address(base, offset, ScaleFactor::TIMES_1, 4), value_hi);
     }
+  } else if (kPoisonHeapReferences && type == Primitive::kPrimNot) {
+    Register temp = locations->GetTemp(0).AsRegister<Register>();
+    __ movl(temp, value_loc.AsRegister<Register>());
+    __ PoisonHeapReference(temp);
+    __ movl(Address(base, offset, ScaleFactor::TIMES_1, 0), temp);
   } else {
     __ movl(Address(base, offset, ScaleFactor::TIMES_1, 0), value_loc.AsRegister<Register>());
   }
@@ -1503,10 +1788,12 @@ static void GenUnsafePut(LocationSummary* locations,
   }
 
   if (type == Primitive::kPrimNot) {
+    bool value_can_be_null = true;  // TODO: Worth finding out this information?
     codegen->MarkGCCard(locations->GetTemp(0).AsRegister<Register>(),
                         locations->GetTemp(1).AsRegister<Register>(),
                         base,
-                        value_loc.AsRegister<Register>());
+                        value_loc.AsRegister<Register>(),
+                        value_can_be_null);
   }
 }
 
@@ -1562,7 +1849,7 @@ static void CreateIntIntIntIntIntToInt(ArenaAllocator* arena, Primitive::Type ty
   locations->SetOut(Location::RegisterLocation(EAX));
   if (type == Primitive::kPrimNot) {
     // Need temp registers for card-marking.
-    locations->AddTemp(Location::RequiresRegister());
+    locations->AddTemp(Location::RequiresRegister());  // Possibly used for reference poisoning too.
     // Need a byte register for marking.
     locations->AddTemp(Location::RegisterLocation(ECX));
   }
@@ -1581,8 +1868,7 @@ void IntrinsicLocationsBuilderX86::VisitUnsafeCASObject(HInvoke* invoke) {
 }
 
 static void GenCAS(Primitive::Type type, HInvoke* invoke, CodeGeneratorX86* codegen) {
-  X86Assembler* assembler =
-    reinterpret_cast<X86Assembler*>(codegen->GetAssembler());
+  X86Assembler* assembler = down_cast<X86Assembler*>(codegen->GetAssembler());
   LocationSummary* locations = invoke->GetLocations();
 
   Register base = locations->InAt(1).AsRegister<Register>();
@@ -1590,33 +1876,98 @@ static void GenCAS(Primitive::Type type, HInvoke* invoke, CodeGeneratorX86* code
   Location out = locations->Out();
   DCHECK_EQ(out.AsRegister<Register>(), EAX);
 
-  if (type == Primitive::kPrimLong) {
-    DCHECK_EQ(locations->InAt(3).AsRegisterPairLow<Register>(), EAX);
-    DCHECK_EQ(locations->InAt(3).AsRegisterPairHigh<Register>(), EDX);
-    DCHECK_EQ(locations->InAt(4).AsRegisterPairLow<Register>(), EBX);
-    DCHECK_EQ(locations->InAt(4).AsRegisterPairHigh<Register>(), ECX);
-    __ LockCmpxchg8b(Address(base, offset, TIMES_1, 0));
-  } else {
-    // Integer or object.
-    DCHECK_EQ(locations->InAt(3).AsRegister<Register>(), EAX);
+  if (type == Primitive::kPrimNot) {
+    Register expected = locations->InAt(3).AsRegister<Register>();
+    // Ensure `expected` is in EAX (required by the CMPXCHG instruction).
+    DCHECK_EQ(expected, EAX);
     Register value = locations->InAt(4).AsRegister<Register>();
-    if (type == Primitive::kPrimNot) {
-      // Mark card for object assuming new value is stored.
-      codegen->MarkGCCard(locations->GetTemp(0).AsRegister<Register>(),
-                          locations->GetTemp(1).AsRegister<Register>(),
-                          base,
-                          value);
+
+    // Mark card for object assuming new value is stored.
+    bool value_can_be_null = true;  // TODO: Worth finding out this information?
+    codegen->MarkGCCard(locations->GetTemp(0).AsRegister<Register>(),
+                        locations->GetTemp(1).AsRegister<Register>(),
+                        base,
+                        value,
+                        value_can_be_null);
+
+    bool base_equals_value = (base == value);
+    if (kPoisonHeapReferences) {
+      if (base_equals_value) {
+        // If `base` and `value` are the same register location, move
+        // `value` to a temporary register.  This way, poisoning
+        // `value` won't invalidate `base`.
+        value = locations->GetTemp(0).AsRegister<Register>();
+        __ movl(value, base);
+      }
+
+      // Check that the register allocator did not assign the location
+      // of `expected` (EAX) to `value` nor to `base`, so that heap
+      // poisoning (when enabled) works as intended below.
+      // - If `value` were equal to `expected`, both references would
+      //   be poisoned twice, meaning they would not be poisoned at
+      //   all, as heap poisoning uses address negation.
+      // - If `base` were equal to `expected`, poisoning `expected`
+      //   would invalidate `base`.
+      DCHECK_NE(value, expected);
+      DCHECK_NE(base, expected);
+
+      __ PoisonHeapReference(expected);
+      __ PoisonHeapReference(value);
     }
 
     __ LockCmpxchgl(Address(base, offset, TIMES_1, 0), value);
+
+    // LOCK CMPXCHG has full barrier semantics, and we don't need
+    // scheduling barriers at this time.
+
+    // Convert ZF into the boolean result.
+    __ setb(kZero, out.AsRegister<Register>());
+    __ movzxb(out.AsRegister<Register>(), out.AsRegister<ByteRegister>());
+
+    // In the case of the `UnsafeCASObject` intrinsic, accessing an
+    // object in the heap with LOCK CMPXCHG does not require a read
+    // barrier, as we do not keep a reference to this heap location.
+    // However, if heap poisoning is enabled, we need to unpoison the
+    // values that were poisoned earlier.
+    if (kPoisonHeapReferences) {
+      if (base_equals_value) {
+        // `value` has been moved to a temporary register, no need to
+        // unpoison it.
+      } else {
+        // Ensure `value` is different from `out`, so that unpoisoning
+        // the former does not invalidate the latter.
+        DCHECK_NE(value, out.AsRegister<Register>());
+        __ UnpoisonHeapReference(value);
+      }
+      // Do not unpoison the reference contained in register
+      // `expected`, as it is the same as register `out` (EAX).
+    }
+  } else {
+    if (type == Primitive::kPrimInt) {
+      // Ensure the expected value is in EAX (required by the CMPXCHG
+      // instruction).
+      DCHECK_EQ(locations->InAt(3).AsRegister<Register>(), EAX);
+      __ LockCmpxchgl(Address(base, offset, TIMES_1, 0),
+                      locations->InAt(4).AsRegister<Register>());
+    } else if (type == Primitive::kPrimLong) {
+      // Ensure the expected value is in EAX:EDX and that the new
+      // value is in EBX:ECX (required by the CMPXCHG8B instruction).
+      DCHECK_EQ(locations->InAt(3).AsRegisterPairLow<Register>(), EAX);
+      DCHECK_EQ(locations->InAt(3).AsRegisterPairHigh<Register>(), EDX);
+      DCHECK_EQ(locations->InAt(4).AsRegisterPairLow<Register>(), EBX);
+      DCHECK_EQ(locations->InAt(4).AsRegisterPairHigh<Register>(), ECX);
+      __ LockCmpxchg8b(Address(base, offset, TIMES_1, 0));
+    } else {
+      LOG(FATAL) << "Unexpected CAS type " << type;
+    }
+
+    // LOCK CMPXCHG/LOCK CMPXCHG8B have full barrier semantics, and we
+    // don't need scheduling barriers at this time.
+
+    // Convert ZF into the boolean result.
+    __ setb(kZero, out.AsRegister<Register>());
+    __ movzxb(out.AsRegister<Register>(), out.AsRegister<ByteRegister>());
   }
-
-  // locked cmpxchg has full barrier semantics, and we don't need scheduling
-  // barriers at this time.
-
-  // Convert ZF into the boolean result.
-  __ setb(kZero, out.AsRegister<Register>());
-  __ movzxb(out.AsRegister<Register>(), out.AsRegister<ByteRegister>());
 }
 
 void IntrinsicCodeGeneratorX86::VisitUnsafeCASInt(HInvoke* invoke) {
@@ -1653,8 +2004,7 @@ static void SwapBits(Register reg, Register temp, int32_t shift, int32_t mask,
 }
 
 void IntrinsicCodeGeneratorX86::VisitIntegerReverse(HInvoke* invoke) {
-  X86Assembler* assembler =
-    reinterpret_cast<X86Assembler*>(codegen_->GetAssembler());
+  X86Assembler* assembler = down_cast<X86Assembler*>(codegen_->GetAssembler());
   LocationSummary* locations = invoke->GetLocations();
 
   Register reg = locations->InAt(0).AsRegister<Register>();
@@ -1685,8 +2035,7 @@ void IntrinsicLocationsBuilderX86::VisitLongReverse(HInvoke* invoke) {
 }
 
 void IntrinsicCodeGeneratorX86::VisitLongReverse(HInvoke* invoke) {
-  X86Assembler* assembler =
-    reinterpret_cast<X86Assembler*>(codegen_->GetAssembler());
+  X86Assembler* assembler = down_cast<X86Assembler*>(codegen_->GetAssembler());
   LocationSummary* locations = invoke->GetLocations();
 
   Register reg_low = locations->InAt(0).AsRegisterPairLow<Register>();
@@ -1713,6 +2062,261 @@ void IntrinsicCodeGeneratorX86::VisitLongReverse(HInvoke* invoke) {
   SwapBits(reg_high, temp, 4, 0x0f0f0f0f, assembler);
 }
 
+static void CreateLeadingZeroLocations(ArenaAllocator* arena, HInvoke* invoke, bool is_long) {
+  LocationSummary* locations = new (arena) LocationSummary(invoke,
+                                                           LocationSummary::kNoCall,
+                                                           kIntrinsified);
+  if (is_long) {
+    locations->SetInAt(0, Location::RequiresRegister());
+  } else {
+    locations->SetInAt(0, Location::Any());
+  }
+  locations->SetOut(Location::RequiresRegister());
+}
+
+static void GenLeadingZeros(X86Assembler* assembler, HInvoke* invoke, bool is_long) {
+  LocationSummary* locations = invoke->GetLocations();
+  Location src = locations->InAt(0);
+  Register out = locations->Out().AsRegister<Register>();
+
+  if (invoke->InputAt(0)->IsConstant()) {
+    // Evaluate this at compile time.
+    int64_t value = Int64FromConstant(invoke->InputAt(0)->AsConstant());
+    if (value == 0) {
+      value = is_long ? 64 : 32;
+    } else {
+      value = is_long ? CLZ(static_cast<uint64_t>(value)) : CLZ(static_cast<uint32_t>(value));
+    }
+    if (value == 0) {
+      __ xorl(out, out);
+    } else {
+      __ movl(out, Immediate(value));
+    }
+    return;
+  }
+
+  // Handle the non-constant cases.
+  if (!is_long) {
+    if (src.IsRegister()) {
+      __ bsrl(out, src.AsRegister<Register>());
+    } else {
+      DCHECK(src.IsStackSlot());
+      __ bsrl(out, Address(ESP, src.GetStackIndex()));
+    }
+
+    // BSR sets ZF if the input was zero, and the output is undefined.
+    NearLabel all_zeroes, done;
+    __ j(kEqual, &all_zeroes);
+
+    // Correct the result from BSR to get the final CLZ result.
+    __ xorl(out, Immediate(31));
+    __ jmp(&done);
+
+    // Fix the zero case with the expected result.
+    __ Bind(&all_zeroes);
+    __ movl(out, Immediate(32));
+
+    __ Bind(&done);
+    return;
+  }
+
+  // 64 bit case needs to worry about both parts of the register.
+  DCHECK(src.IsRegisterPair());
+  Register src_lo = src.AsRegisterPairLow<Register>();
+  Register src_hi = src.AsRegisterPairHigh<Register>();
+  NearLabel handle_low, done, all_zeroes;
+
+  // Is the high word zero?
+  __ testl(src_hi, src_hi);
+  __ j(kEqual, &handle_low);
+
+  // High word is not zero. We know that the BSR result is defined in this case.
+  __ bsrl(out, src_hi);
+
+  // Correct the result from BSR to get the final CLZ result.
+  __ xorl(out, Immediate(31));
+  __ jmp(&done);
+
+  // High word was zero.  We have to compute the low word count and add 32.
+  __ Bind(&handle_low);
+  __ bsrl(out, src_lo);
+  __ j(kEqual, &all_zeroes);
+
+  // We had a valid result.  Use an XOR to both correct the result and add 32.
+  __ xorl(out, Immediate(63));
+  __ jmp(&done);
+
+  // All zero case.
+  __ Bind(&all_zeroes);
+  __ movl(out, Immediate(64));
+
+  __ Bind(&done);
+}
+
+void IntrinsicLocationsBuilderX86::VisitIntegerNumberOfLeadingZeros(HInvoke* invoke) {
+  CreateLeadingZeroLocations(arena_, invoke, /* is_long */ false);
+}
+
+void IntrinsicCodeGeneratorX86::VisitIntegerNumberOfLeadingZeros(HInvoke* invoke) {
+  X86Assembler* assembler = down_cast<X86Assembler*>(codegen_->GetAssembler());
+  GenLeadingZeros(assembler, invoke, /* is_long */ false);
+}
+
+void IntrinsicLocationsBuilderX86::VisitLongNumberOfLeadingZeros(HInvoke* invoke) {
+  CreateLeadingZeroLocations(arena_, invoke, /* is_long */ true);
+}
+
+void IntrinsicCodeGeneratorX86::VisitLongNumberOfLeadingZeros(HInvoke* invoke) {
+  X86Assembler* assembler = down_cast<X86Assembler*>(codegen_->GetAssembler());
+  GenLeadingZeros(assembler, invoke, /* is_long */ true);
+}
+
+static void CreateTrailingZeroLocations(ArenaAllocator* arena, HInvoke* invoke, bool is_long) {
+  LocationSummary* locations = new (arena) LocationSummary(invoke,
+                                                           LocationSummary::kNoCall,
+                                                           kIntrinsified);
+  if (is_long) {
+    locations->SetInAt(0, Location::RequiresRegister());
+  } else {
+    locations->SetInAt(0, Location::Any());
+  }
+  locations->SetOut(Location::RequiresRegister());
+}
+
+static void GenTrailingZeros(X86Assembler* assembler, HInvoke* invoke, bool is_long) {
+  LocationSummary* locations = invoke->GetLocations();
+  Location src = locations->InAt(0);
+  Register out = locations->Out().AsRegister<Register>();
+
+  if (invoke->InputAt(0)->IsConstant()) {
+    // Evaluate this at compile time.
+    int64_t value = Int64FromConstant(invoke->InputAt(0)->AsConstant());
+    if (value == 0) {
+      value = is_long ? 64 : 32;
+    } else {
+      value = is_long ? CTZ(static_cast<uint64_t>(value)) : CTZ(static_cast<uint32_t>(value));
+    }
+    if (value == 0) {
+      __ xorl(out, out);
+    } else {
+      __ movl(out, Immediate(value));
+    }
+    return;
+  }
+
+  // Handle the non-constant cases.
+  if (!is_long) {
+    if (src.IsRegister()) {
+      __ bsfl(out, src.AsRegister<Register>());
+    } else {
+      DCHECK(src.IsStackSlot());
+      __ bsfl(out, Address(ESP, src.GetStackIndex()));
+    }
+
+    // BSF sets ZF if the input was zero, and the output is undefined.
+    NearLabel done;
+    __ j(kNotEqual, &done);
+
+    // Fix the zero case with the expected result.
+    __ movl(out, Immediate(32));
+
+    __ Bind(&done);
+    return;
+  }
+
+  // 64 bit case needs to worry about both parts of the register.
+  DCHECK(src.IsRegisterPair());
+  Register src_lo = src.AsRegisterPairLow<Register>();
+  Register src_hi = src.AsRegisterPairHigh<Register>();
+  NearLabel done, all_zeroes;
+
+  // If the low word is zero, then ZF will be set.  If not, we have the answer.
+  __ bsfl(out, src_lo);
+  __ j(kNotEqual, &done);
+
+  // Low word was zero.  We have to compute the high word count and add 32.
+  __ bsfl(out, src_hi);
+  __ j(kEqual, &all_zeroes);
+
+  // We had a valid result.  Add 32 to account for the low word being zero.
+  __ addl(out, Immediate(32));
+  __ jmp(&done);
+
+  // All zero case.
+  __ Bind(&all_zeroes);
+  __ movl(out, Immediate(64));
+
+  __ Bind(&done);
+}
+
+void IntrinsicLocationsBuilderX86::VisitIntegerNumberOfTrailingZeros(HInvoke* invoke) {
+  CreateTrailingZeroLocations(arena_, invoke, /* is_long */ false);
+}
+
+void IntrinsicCodeGeneratorX86::VisitIntegerNumberOfTrailingZeros(HInvoke* invoke) {
+  X86Assembler* assembler = down_cast<X86Assembler*>(codegen_->GetAssembler());
+  GenTrailingZeros(assembler, invoke, /* is_long */ false);
+}
+
+void IntrinsicLocationsBuilderX86::VisitLongNumberOfTrailingZeros(HInvoke* invoke) {
+  CreateTrailingZeroLocations(arena_, invoke, /* is_long */ true);
+}
+
+void IntrinsicCodeGeneratorX86::VisitLongNumberOfTrailingZeros(HInvoke* invoke) {
+  X86Assembler* assembler = down_cast<X86Assembler*>(codegen_->GetAssembler());
+  GenTrailingZeros(assembler, invoke, /* is_long */ true);
+}
+
+static void CreateRotateLocations(ArenaAllocator* arena, HInvoke* invoke) {
+  LocationSummary* locations = new (arena) LocationSummary(invoke,
+                                                           LocationSummary::kNoCall,
+                                                           kIntrinsified);
+  locations->SetInAt(0, Location::RequiresRegister());
+  // The shift count needs to be in CL or a constant.
+  locations->SetInAt(1, Location::ByteRegisterOrConstant(ECX, invoke->InputAt(1)));
+  locations->SetOut(Location::SameAsFirstInput());
+}
+
+static void GenRotate(X86Assembler* assembler, HInvoke* invoke, bool is_left) {
+  LocationSummary* locations = invoke->GetLocations();
+  Register first_reg = locations->InAt(0).AsRegister<Register>();
+  Location second = locations->InAt(1);
+
+  if (second.IsRegister()) {
+    Register second_reg = second.AsRegister<Register>();
+    if (is_left) {
+      __ roll(first_reg, second_reg);
+    } else {
+      __ rorl(first_reg, second_reg);
+    }
+  } else {
+    Immediate imm(second.GetConstant()->AsIntConstant()->GetValue() & kMaxIntShiftValue);
+    if (is_left) {
+      __ roll(first_reg, imm);
+    } else {
+      __ rorl(first_reg, imm);
+    }
+  }
+}
+
+void IntrinsicLocationsBuilderX86::VisitIntegerRotateLeft(HInvoke* invoke) {
+  CreateRotateLocations(arena_, invoke);
+}
+
+void IntrinsicCodeGeneratorX86::VisitIntegerRotateLeft(HInvoke* invoke) {
+  X86Assembler* assembler = down_cast<X86Assembler*>(codegen_->GetAssembler());
+  GenRotate(assembler, invoke, /* is_left */ true);
+}
+
+void IntrinsicLocationsBuilderX86::VisitIntegerRotateRight(HInvoke* invoke) {
+  CreateRotateLocations(arena_, invoke);
+}
+
+void IntrinsicCodeGeneratorX86::VisitIntegerRotateRight(HInvoke* invoke) {
+  X86Assembler* assembler = down_cast<X86Assembler*>(codegen_->GetAssembler());
+  GenRotate(assembler, invoke, /* is_left */ false);
+}
+
 // Unimplemented intrinsics.
 
 #define UNIMPLEMENTED_INTRINSIC(Name)                                                   \
@@ -1722,9 +2326,14 @@ void IntrinsicCodeGeneratorX86::Visit ## Name(HInvoke* invoke ATTRIBUTE_UNUSED) 
 }
 
 UNIMPLEMENTED_INTRINSIC(MathRoundDouble)
-UNIMPLEMENTED_INTRINSIC(StringGetCharsNoCheck)
-UNIMPLEMENTED_INTRINSIC(SystemArrayCopyChar)
 UNIMPLEMENTED_INTRINSIC(ReferenceGetReferent)
+UNIMPLEMENTED_INTRINSIC(LongRotateRight)
+UNIMPLEMENTED_INTRINSIC(LongRotateLeft)
+UNIMPLEMENTED_INTRINSIC(SystemArrayCopy)
+
+#undef UNIMPLEMENTED_INTRINSIC
+
+#undef __
 
 }  // namespace x86
 }  // namespace art

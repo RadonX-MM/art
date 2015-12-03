@@ -31,8 +31,10 @@ namespace dwarf {
 //  * Choose the most compact encoding of a given opcode.
 //  * Keep track of current state and convert absolute values to deltas.
 //  * Divide by header-defined factors as appropriate.
-template<typename Allocator = std::allocator<uint8_t> >
-class DebugFrameOpCodeWriter : private Writer<Allocator> {
+template<typename Vector = std::vector<uint8_t> >
+class DebugFrameOpCodeWriter : private Writer<Vector> {
+  static_assert(std::is_same<typename Vector::value_type, uint8_t>::value, "Invalid value type");
+
  public:
   // To save space, DWARF divides most offsets by header-defined factors.
   // They are used in integer divisions, so we make them constants.
@@ -280,7 +282,12 @@ class DebugFrameOpCodeWriter : private Writer<Allocator> {
 
   bool IsEnabled() const { return enabled_; }
 
-  void SetEnabled(bool value) { enabled_ = value; }
+  void SetEnabled(bool value) {
+    enabled_ = value;
+    if (enabled_ && opcodes_.capacity() == 0u) {
+      opcodes_.reserve(kDefaultCapacity);
+    }
+  }
 
   int GetCurrentPC() const { return current_pc_; }
 
@@ -288,25 +295,26 @@ class DebugFrameOpCodeWriter : private Writer<Allocator> {
 
   void SetCurrentCFAOffset(int offset) { current_cfa_offset_ = offset; }
 
-  using Writer<Allocator>::data;
+  using Writer<Vector>::data;
 
-  DebugFrameOpCodeWriter(bool enabled = true,
-                         const Allocator& alloc = Allocator())
-      : Writer<Allocator>(&opcodes_),
-        enabled_(enabled),
+  explicit DebugFrameOpCodeWriter(bool enabled = true,
+                                  const typename Vector::allocator_type& alloc =
+                                      typename Vector::allocator_type())
+      : Writer<Vector>(&opcodes_),
+        enabled_(false),
         opcodes_(alloc),
         current_cfa_offset_(0),
         current_pc_(0),
         uses_dwarf3_features_(false) {
-    if (enabled) {
-      // Best guess based on couple of observed outputs.
-      opcodes_.reserve(16);
-    }
+    SetEnabled(enabled);
   }
 
   virtual ~DebugFrameOpCodeWriter() { }
 
  protected:
+  // Best guess based on couple of observed outputs.
+  static constexpr size_t kDefaultCapacity = 32u;
+
   int FactorDataOffset(int offset) const {
     DCHECK_EQ(offset % kDataAlignmentFactor, 0);
     return offset / kDataAlignmentFactor;
@@ -318,7 +326,7 @@ class DebugFrameOpCodeWriter : private Writer<Allocator> {
   }
 
   bool enabled_;  // If disabled all writes are no-ops.
-  std::vector<uint8_t, Allocator> opcodes_;
+  Vector opcodes_;
   int current_cfa_offset_;
   int current_pc_;
   bool uses_dwarf3_features_;

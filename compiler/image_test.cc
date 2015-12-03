@@ -23,7 +23,9 @@
 #include "base/unix_file/fd_file.h"
 #include "class_linker-inl.h"
 #include "common_compiler_test.h"
+#include "dwarf/method_debug_info.h"
 #include "elf_writer.h"
+#include "elf_writer_quick.h"
 #include "gc/space/image_space.h"
 #include "image_writer.h"
 #include "lock_word.h"
@@ -45,6 +47,7 @@ class ImageTest : public CommonCompilerTest {
 };
 
 TEST_F(ImageTest, WriteRead) {
+  TEST_DISABLED_FOR_NON_PIC_COMPILING_WITH_OPTIMIZING();
   // Create a generic location tmp file, to be the base of the .art and .oat temporary files.
   ScratchFile location;
   ScratchFile image_location(location, ".art");
@@ -63,8 +66,10 @@ TEST_F(ImageTest, WriteRead) {
   ScratchFile oat_file(OS::CreateEmptyFile(oat_filename.c_str()));
 
   const uintptr_t requested_image_base = ART_BASE_ADDRESS;
-  std::unique_ptr<ImageWriter> writer(new ImageWriter(*compiler_driver_, requested_image_base,
-                                                      /*compile_pic*/false));
+  std::unique_ptr<ImageWriter> writer(new ImageWriter(*compiler_driver_,
+                                                      requested_image_base,
+                                                      /*compile_pic*/false,
+                                                      /*compile_app_image*/false));
   // TODO: compile_pic should be a test argument.
   {
     {
@@ -75,18 +80,51 @@ TEST_F(ImageTest, WriteRead) {
       for (const DexFile* dex_file : class_linker->GetBootClassPath()) {
         dex_file->EnableWrite();
       }
+      compiler_driver_->SetDexFilesForOatFile(class_linker->GetBootClassPath());
       compiler_driver_->CompileAll(class_loader, class_linker->GetBootClassPath(), &timings);
 
       t.NewTiming("WriteElf");
       SafeMap<std::string, std::string> key_value_store;
-      OatWriter oat_writer(class_linker->GetBootClassPath(), 0, 0, 0, compiler_driver_.get(),
-                           writer.get(), &timings, &key_value_store);
-      bool success = writer->PrepareImageAddressSpace() &&
-          compiler_driver_->WriteElf(GetTestAndroidRoot(),
-                                     !kIsTargetBuild,
-                                     class_linker->GetBootClassPath(),
-                                     &oat_writer,
-                                     oat_file.GetFile());
+      OatWriter oat_writer(class_linker->GetBootClassPath(),
+                           0,
+                           0,
+                           0,
+                           compiler_driver_.get(),
+                           writer.get(),
+                           /*compiling_boot_image*/true,
+                           &timings,
+                           &key_value_store);
+      std::unique_ptr<ElfWriter> elf_writer = CreateElfWriterQuick(
+          compiler_driver_->GetInstructionSet(),
+          &compiler_driver_->GetCompilerOptions(),
+          oat_file.GetFile());
+      bool success = writer->PrepareImageAddressSpace();
+      ASSERT_TRUE(success);
+
+      elf_writer->Start();
+
+      OutputStream* rodata = elf_writer->StartRoData();
+      bool rodata_ok = oat_writer.WriteRodata(rodata);
+      ASSERT_TRUE(rodata_ok);
+      elf_writer->EndRoData(rodata);
+
+      OutputStream* text = elf_writer->StartText();
+      bool text_ok = oat_writer.WriteCode(text);
+      ASSERT_TRUE(text_ok);
+      elf_writer->EndText(text);
+
+      elf_writer->SetBssSize(oat_writer.GetBssSize());
+
+      elf_writer->WriteDynamicSection();
+
+      ArrayRef<const dwarf::MethodDebugInfo> method_infos(oat_writer.GetMethodDebugInfo());
+      elf_writer->WriteDebugInfo(method_infos);
+
+      ArrayRef<const uintptr_t> patch_locations(oat_writer.GetAbsolutePatchLocations());
+      elf_writer->WritePatchLocations(patch_locations);
+
+      success = elf_writer->End();
+
       ASSERT_TRUE(success);
     }
   }
@@ -95,8 +133,10 @@ TEST_F(ImageTest, WriteRead) {
   ASSERT_TRUE(dup_oat.get() != nullptr);
 
   {
-    bool success_image =
-        writer->Write(image_file.GetFilename(), dup_oat->GetPath(), dup_oat->GetPath());
+    bool success_image = writer->Write(kInvalidImageFd,
+                                       image_file.GetFilename(),
+                                       dup_oat->GetPath(),
+                                       dup_oat->GetPath());
     ASSERT_TRUE(success_image);
     bool success_fixup = ElfWriter::Fixup(dup_oat.get(), writer->GetOatDataBegin());
     ASSERT_TRUE(success_fixup);
@@ -168,7 +208,7 @@ TEST_F(ImageTest, WriteRead) {
   ASSERT_TRUE(heap->HasImageSpace());
   ASSERT_TRUE(heap->GetNonMovingSpace()->IsMallocSpace());
 
-  gc::space::ImageSpace* image_space = heap->GetImageSpace();
+  gc::space::ImageSpace* image_space = heap->GetBootImageSpace();
   ASSERT_TRUE(image_space != nullptr);
   ASSERT_LE(image_space->Size(), image_file_size);
 

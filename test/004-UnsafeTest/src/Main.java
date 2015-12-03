@@ -18,10 +18,6 @@ import java.lang.reflect.Field;
 import sun.misc.Unsafe;
 
 public class Main {
-  static {
-    System.loadLibrary("arttest");
-  }
-
   private static void check(int actual, int expected, String msg) {
     if (actual != expected) {
       System.out.println(msg + " : " + actual + " != " + expected);
@@ -36,6 +32,13 @@ public class Main {
     }
   }
 
+  private static void check(Object actual, Object expected, String msg) {
+    if (actual != expected) {
+      System.out.println(msg + " : " + actual + " != " + expected);
+      System.exit(1);
+    }
+  }
+
   private static Unsafe getUnsafe() throws Exception {
     Class<?> unsafeClass = Class.forName("sun.misc.Unsafe");
     Field f = unsafeClass.getDeclaredField("theUnsafe");
@@ -44,6 +47,7 @@ public class Main {
   }
 
   public static void main(String[] args) throws Exception {
+    System.loadLibrary(args[0]);
     Unsafe unsafe = getUnsafe();
     check(unsafe.arrayBaseOffset(boolean[].class), vmArrayBaseOffset(boolean[].class),
         "Unsafe.arrayBaseOffset(boolean[])");
@@ -80,6 +84,7 @@ public class Main {
         "Unsafe.arrayIndexScale(Object[])");
 
     TestClass t = new TestClass();
+
     int intValue = 12345678;
     Field intField = TestClass.class.getDeclaredField("intVar");
     long intOffset = unsafe.objectFieldOffset(intField);
@@ -87,13 +92,22 @@ public class Main {
     unsafe.putInt(t, intOffset, intValue);
     check(t.intVar, intValue, "Unsafe.putInt(Object, long, int)");
     check(unsafe.getInt(t, intOffset), intValue, "Unsafe.getInt(Object, long)");
+
+    long longValue = 1234567887654321L;
     Field longField = TestClass.class.getDeclaredField("longVar");
     long longOffset = unsafe.objectFieldOffset(longField);
-    long longValue = 1234567887654321L;
     check(unsafe.getLong(t, longOffset), 0, "Unsafe.getLong(Object, long) - initial");
     unsafe.putLong(t, longOffset, longValue);
     check(t.longVar, longValue, "Unsafe.putLong(Object, long, long)");
     check(unsafe.getLong(t, longOffset), longValue, "Unsafe.getLong(Object, long)");
+
+    Object objectValue = new Object();
+    Field objectField = TestClass.class.getDeclaredField("objectVar");
+    long objectOffset = unsafe.objectFieldOffset(objectField);
+    check(unsafe.getObject(t, objectOffset), null, "Unsafe.getObject(Object, long) - initial");
+    unsafe.putObject(t, objectOffset, objectValue);
+    check(t.objectVar, objectValue, "Unsafe.putObject(Object, long, Object)");
+    check(unsafe.getObject(t, objectOffset), objectValue, "Unsafe.getObject(Object, long)");
 
     if (unsafe.compareAndSwapInt(t, intOffset, 0, 1)) {
         System.out.println("Unexpectedly succeeding compareAndSwap...");
@@ -114,11 +128,45 @@ public class Main {
     if (!unsafe.compareAndSwapLong(t, longOffset, 0, 1)) {
         System.out.println("Unexpectedly not succeeding compareAndSwapLong...");
     }
+
+    // We do not use `null` as argument to sun.misc.Unsafe.compareAndSwapObject
+    // in those tests, as this value is not affected by heap poisoning
+    // (which uses address negation to poison and unpoison heap object
+    // references).  This way, when heap poisoning is enabled, we can
+    // better exercise its implementation within that method.
+    if (unsafe.compareAndSwapObject(t, objectOffset, new Object(), new Object())) {
+        System.out.println("Unexpectedly succeeding compareAndSwapObject...");
+    }
+    Object objectValue2 = new Object();
+    if (!unsafe.compareAndSwapObject(t, objectOffset, objectValue, objectValue2)) {
+        System.out.println("Unexpectedly not succeeding compareAndSwapObject...");
+    }
+    Object objectValue3 = new Object();
+    if (!unsafe.compareAndSwapObject(t, objectOffset, objectValue2, objectValue3)) {
+        System.out.println("Unexpectedly not succeeding compareAndSwapObject...");
+    }
+
+    // Exercise sun.misc.Unsafe.compareAndSwapObject using the same
+    // object (`t`) for the `obj` and `newValue` arguments.
+    if (!unsafe.compareAndSwapObject(t, objectOffset, objectValue3, t)) {
+        System.out.println("Unexpectedly not succeeding compareAndSwapObject...");
+    }
+    // Exercise sun.misc.Unsafe.compareAndSwapObject using the same
+    // object (`t`) for the `obj`, `expectedValue` and `newValue` arguments.
+    if (!unsafe.compareAndSwapObject(t, objectOffset, t, t)) {
+        System.out.println("Unexpectedly not succeeding compareAndSwapObject...");
+    }
+    // Exercise sun.misc.Unsafe.compareAndSwapObject using the same
+    // object (`t`) for the `obj` and `expectedValue` arguments.
+    if (!unsafe.compareAndSwapObject(t, objectOffset, t, new Object())) {
+        System.out.println("Unexpectedly not succeeding compareAndSwapObject...");
+    }
   }
 
   private static class TestClass {
     public int intVar = 0;
     public long longVar = 0;
+    public Object objectVar = null;
   }
 
   private static native int vmArrayBaseOffset(Class clazz);

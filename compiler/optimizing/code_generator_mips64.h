@@ -82,7 +82,8 @@ class InvokeDexCallingConventionVisitorMIPS64 : public InvokeDexCallingConventio
   virtual ~InvokeDexCallingConventionVisitorMIPS64() {}
 
   Location GetNextLocation(Primitive::Type type) OVERRIDE;
-  Location GetReturnLocation(Primitive::Type type) const;
+  Location GetReturnLocation(Primitive::Type type) const OVERRIDE;
+  Location GetMethodLocation() const OVERRIDE;
 
  private:
   InvokeDexCallingConvention calling_convention;
@@ -103,6 +104,34 @@ class InvokeRuntimeCallingConvention : public CallingConvention<GpuRegister, Fpu
 
  private:
   DISALLOW_COPY_AND_ASSIGN(InvokeRuntimeCallingConvention);
+};
+
+class FieldAccessCallingConventionMIPS64 : public FieldAccessCallingConvention {
+ public:
+  FieldAccessCallingConventionMIPS64() {}
+
+  Location GetObjectLocation() const OVERRIDE {
+    return Location::RegisterLocation(A1);
+  }
+  Location GetFieldIndexLocation() const OVERRIDE {
+    return Location::RegisterLocation(A0);
+  }
+  Location GetReturnLocation(Primitive::Type type ATTRIBUTE_UNUSED) const OVERRIDE {
+    return Location::RegisterLocation(V0);
+  }
+  Location GetSetValueLocation(Primitive::Type type, bool is_instance) const OVERRIDE {
+    return Primitive::Is64BitType(type)
+        ? Location::RegisterLocation(A2)
+        : (is_instance
+            ? Location::RegisterLocation(A2)
+            : Location::RegisterLocation(A1));
+  }
+  Location GetFpuLocation(Primitive::Type type ATTRIBUTE_UNUSED) const OVERRIDE {
+    return Location::FpuRegisterLocation(F0);
+  }
+
+ private:
+  DISALLOW_COPY_AND_ASSIGN(FieldAccessCallingConventionMIPS64);
 };
 
 class ParallelMoveResolverMIPS64 : public ParallelMoveResolverWithSwap {
@@ -129,12 +158,12 @@ class SlowPathCodeMIPS64 : public SlowPathCode {
  public:
   SlowPathCodeMIPS64() : entry_label_(), exit_label_() {}
 
-  Label* GetEntryLabel() { return &entry_label_; }
-  Label* GetExitLabel() { return &exit_label_; }
+  Mips64Label* GetEntryLabel() { return &entry_label_; }
+  Mips64Label* GetExitLabel() { return &exit_label_; }
 
  private:
-  Label entry_label_;
-  Label exit_label_;
+  Mips64Label entry_label_;
+  Mips64Label exit_label_;
 
   DISALLOW_COPY_AND_ASSIGN(SlowPathCodeMIPS64);
 };
@@ -145,11 +174,17 @@ class LocationsBuilderMIPS64 : public HGraphVisitor {
       : HGraphVisitor(graph), codegen_(codegen) {}
 
 #define DECLARE_VISIT_INSTRUCTION(name, super)     \
-  void Visit##name(H##name* instr);
+  void Visit##name(H##name* instr) OVERRIDE;
 
-  FOR_EACH_CONCRETE_INSTRUCTION(DECLARE_VISIT_INSTRUCTION)
+  FOR_EACH_CONCRETE_INSTRUCTION_COMMON(DECLARE_VISIT_INSTRUCTION)
+  FOR_EACH_CONCRETE_INSTRUCTION_MIPS64(DECLARE_VISIT_INSTRUCTION)
 
 #undef DECLARE_VISIT_INSTRUCTION
+
+  void VisitInstruction(HInstruction* instruction) OVERRIDE {
+    LOG(FATAL) << "Unreachable instruction " << instruction->DebugName()
+               << " (id " << instruction->GetId() << ")";
+  }
 
  private:
   void HandleInvoke(HInvoke* invoke);
@@ -170,18 +205,21 @@ class InstructionCodeGeneratorMIPS64 : public HGraphVisitor {
   InstructionCodeGeneratorMIPS64(HGraph* graph, CodeGeneratorMIPS64* codegen);
 
 #define DECLARE_VISIT_INSTRUCTION(name, super)     \
-  void Visit##name(H##name* instr);
+  void Visit##name(H##name* instr) OVERRIDE;
 
-  FOR_EACH_CONCRETE_INSTRUCTION(DECLARE_VISIT_INSTRUCTION)
+  FOR_EACH_CONCRETE_INSTRUCTION_COMMON(DECLARE_VISIT_INSTRUCTION)
+  FOR_EACH_CONCRETE_INSTRUCTION_MIPS64(DECLARE_VISIT_INSTRUCTION)
 
 #undef DECLARE_VISIT_INSTRUCTION
+
+  void VisitInstruction(HInstruction* instruction) OVERRIDE {
+    LOG(FATAL) << "Unreachable instruction " << instruction->DebugName()
+               << " (id " << instruction->GetId() << ")";
+  }
 
   Mips64Assembler* GetAssembler() const { return assembler_; }
 
  private:
-  // Generate code for the given suspend check. If not null, `successor`
-  // is the block to branch to if the suspend check is not needed, and after
-  // the suspend call.
   void GenerateClassInitializationCheck(SlowPathCodeMIPS64* slow_path, GpuRegister class_reg);
   void GenerateMemoryBarrier(MemBarrierKind kind);
   void GenerateSuspendCheck(HSuspendCheck* check, HBasicBlock* successor);
@@ -192,9 +230,14 @@ class InstructionCodeGeneratorMIPS64 : public HGraphVisitor {
   void GenerateImplicitNullCheck(HNullCheck* instruction);
   void GenerateExplicitNullCheck(HNullCheck* instruction);
   void GenerateTestAndBranch(HInstruction* instruction,
-                             Label* true_target,
-                             Label* false_target,
-                             Label* always_true_target);
+                             size_t condition_input_index,
+                             Mips64Label* true_target,
+                             Mips64Label* false_target);
+  void DivRemOneOrMinusOne(HBinaryOperation* instruction);
+  void DivRemByPowerOfTwo(HBinaryOperation* instruction);
+  void GenerateDivRemWithAnyConstant(HBinaryOperation* instruction);
+  void GenerateDivRemIntegral(HBinaryOperation* instruction);
+  void HandleGoto(HInstruction* got, HBasicBlock* successor);
 
   Mips64Assembler* const assembler_;
   CodeGeneratorMIPS64* const codegen_;
@@ -206,7 +249,8 @@ class CodeGeneratorMIPS64 : public CodeGenerator {
  public:
   CodeGeneratorMIPS64(HGraph* graph,
                       const Mips64InstructionSetFeatures& isa_features,
-                      const CompilerOptions& compiler_options);
+                      const CompilerOptions& compiler_options,
+                      OptimizingCompilerStats* stats = nullptr);
   virtual ~CodeGeneratorMIPS64() {}
 
   void GenerateFrameEntry() OVERRIDE;
@@ -221,12 +265,13 @@ class CodeGeneratorMIPS64 : public CodeGenerator {
   size_t GetFloatingPointSpillSlotSize() const OVERRIDE { return kMips64WordSize; }
 
   uintptr_t GetAddressOf(HBasicBlock* block) const OVERRIDE {
-    return GetLabelOf(block)->Position();
+    return assembler_.GetLabelLocation(GetLabelOf(block));
   }
 
   HGraphVisitor* GetLocationBuilder() OVERRIDE { return &location_builder_; }
   HGraphVisitor* GetInstructionVisitor() OVERRIDE { return &instruction_visitor_; }
   Mips64Assembler* GetAssembler() OVERRIDE { return &assembler_; }
+  const Mips64Assembler& GetAssembler() const OVERRIDE { return assembler_; }
 
   void MarkGCCard(GpuRegister object, GpuRegister value);
 
@@ -253,25 +298,32 @@ class CodeGeneratorMIPS64 : public CodeGenerator {
     return isa_features_;
   }
 
-  Label* GetLabelOf(HBasicBlock* block) const {
-    return CommonGetLabelOf<Label>(block_labels_.GetRawStorage(), block);
+  Mips64Label* GetLabelOf(HBasicBlock* block) const {
+    return CommonGetLabelOf<Mips64Label>(block_labels_, block);
   }
 
   void Initialize() OVERRIDE {
-    block_labels_.SetSize(GetGraph()->GetBlocks().Size());
+    block_labels_ = CommonInitializeLabels<Mips64Label>();
   }
 
   void Finalize(CodeAllocator* allocator) OVERRIDE;
 
   // Code generation helpers.
+  void MoveLocation(Location dst, Location src, Primitive::Type dst_type) OVERRIDE;
 
-  void MoveLocation(Location destination, Location source, Primitive::Type type);
+  void MoveConstant(Location destination, int32_t value) OVERRIDE;
+
+  void AddLocationAsTemp(Location location, LocationSummary* locations) OVERRIDE;
+
 
   void SwapLocations(Location loc1, Location loc2, Primitive::Type type);
 
-  void LoadCurrentMethod(GpuRegister current_method);
-
   // Generate code to invoke a runtime entry point.
+  void InvokeRuntime(QuickEntrypointEnum entrypoint,
+                     HInstruction* instruction,
+                     uint32_t dex_pc,
+                     SlowPathCode* slow_path) OVERRIDE;
+
   void InvokeRuntime(int32_t offset,
                      HInstruction* instruction,
                      uint32_t dex_pc,
@@ -281,12 +333,24 @@ class CodeGeneratorMIPS64 : public CodeGenerator {
 
   bool NeedsTwoRegisters(Primitive::Type type ATTRIBUTE_UNUSED) const { return false; }
 
-  void GenerateStaticOrDirectCall(HInvokeStaticOrDirect* invoke, GpuRegister temp);
+  // Check if the desired_dispatch_info is supported. If it is, return it,
+  // otherwise return a fall-back info that should be used instead.
+  HInvokeStaticOrDirect::DispatchInfo GetSupportedInvokeStaticOrDirectDispatch(
+      const HInvokeStaticOrDirect::DispatchInfo& desired_dispatch_info,
+      MethodReference target_method) OVERRIDE;
+
+  void GenerateStaticOrDirectCall(HInvokeStaticOrDirect* invoke, Location temp) OVERRIDE;
+  void GenerateVirtualCall(HInvokeVirtual* invoke, Location temp) OVERRIDE;
+
+  void MoveFromReturnRegister(Location trg ATTRIBUTE_UNUSED,
+                              Primitive::Type type ATTRIBUTE_UNUSED) OVERRIDE {
+    UNIMPLEMENTED(FATAL);
+  }
 
  private:
   // Labels for each block that will be compiled.
-  GrowableArray<Label> block_labels_;
-  Label frame_entry_label_;
+  Mips64Label* block_labels_;  // Indexed by block id.
+  Mips64Label frame_entry_label_;
   LocationsBuilderMIPS64 location_builder_;
   InstructionCodeGeneratorMIPS64 instruction_visitor_;
   ParallelMoveResolverMIPS64 move_resolver_;

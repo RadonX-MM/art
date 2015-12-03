@@ -18,7 +18,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
-#include <valgrind.h>
+#include "base/memory_tool.h"
 
 #include <fstream>
 #include <iostream>
@@ -55,8 +55,10 @@
 #include "dex/quick/dex_file_to_method_inliner_map.h"
 #include "driver/compiler_driver.h"
 #include "driver/compiler_options.h"
+#include "dwarf/method_debug_info.h"
 #include "elf_file.h"
 #include "elf_writer.h"
+#include "elf_writer_quick.h"
 #include "gc/space/image_space.h"
 #include "gc/space/space-inl.h"
 #include "image_writer.h"
@@ -129,11 +131,12 @@ static std::string StrippedCommandLine() {
 
     // However, we prefer to drop this when we saw --zip-fd.
     if (saw_zip_fd) {
-      // Drop anything --zip-X, --dex-X, --oat-X, --swap-X.
+      // Drop anything --zip-X, --dex-X, --oat-X, --swap-X, or --app-image-X
       if (StartsWith(original_argv[i], "--zip-") ||
           StartsWith(original_argv[i], "--dex-") ||
           StartsWith(original_argv[i], "--oat-") ||
-          StartsWith(original_argv[i], "--swap-")) {
+          StartsWith(original_argv[i], "--swap-") ||
+          StartsWith(original_argv[i], "--app-image-")) {
         continue;
       }
     }
@@ -238,11 +241,7 @@ NO_RETURN static void Usage(const char* fmt, ...) {
   UsageError("  --compiler-backend=(Quick|Optimizing): select compiler backend");
   UsageError("      set.");
   UsageError("      Example: --compiler-backend=Optimizing");
-  if (kUseOptimizingCompiler) {
-    UsageError("      Default: Optimizing");
-  } else {
-    UsageError("      Default: Quick");
-  }
+  UsageError("      Default: Optimizing");
   UsageError("");
   UsageError("  --compiler-filter="
                 "(verify-none"
@@ -312,6 +311,8 @@ NO_RETURN static void Usage(const char* fmt, ...) {
   UsageError("      stripped using standard command line tools such as strip or objcopy.");
   UsageError("      (enabled by default in debug builds, disabled by default otherwise)");
   UsageError("");
+  UsageError("  --debuggable: Produce debuggable code. Implies --generate-debug-info.");
+  UsageError("");
   UsageError("  --no-generate-debug-info: Do not generate debug information for native debugging.");
   UsageError("");
   UsageError("  --runtime-arg <argument>: used to specify various arguments for the runtime,");
@@ -340,6 +341,12 @@ NO_RETURN static void Usage(const char* fmt, ...) {
   UsageError("");
   UsageError("  --swap-fd=<file-descriptor>:  specifies a file to use for swap (by descriptor).");
   UsageError("      Example: --swap-fd=10");
+  UsageError("");
+  UsageError("  --app-image-fd=<file-descriptor>: specify output file descriptor for app image.");
+  UsageError("      Example: --app-image-fd=10");
+  UsageError("");
+  UsageError("  --app-image-file=<file-name>: specify a file name for app image.");
+  UsageError("      Example: --app-image-file=/data/dalvik-cache/system@app@Calculator.apk.art");
   UsageError("");
   std::cerr << "See log for usage error information\n";
   exit(EXIT_FAILURE);
@@ -450,38 +457,6 @@ class WatchDog {
   pthread_t pthread_;
 };
 
-static void ParseStringAfterChar(const std::string& s, char c, std::string* parsed_value) {
-  std::string::size_type colon = s.find(c);
-  if (colon == std::string::npos) {
-    Usage("Missing char %c in option %s\n", c, s.c_str());
-  }
-  // Add one to remove the char we were trimming until.
-  *parsed_value = s.substr(colon + 1);
-}
-
-static void ParseDouble(const std::string& option, char after_char, double min, double max,
-                        double* parsed_value) {
-  std::string substring;
-  ParseStringAfterChar(option, after_char, &substring);
-  bool sane_val = true;
-  double value;
-  if (false) {
-    // TODO: this doesn't seem to work on the emulator.  b/15114595
-    std::stringstream iss(substring);
-    iss >> value;
-    // Ensure that we have a value, there was no cruft after it and it satisfies a sensible range.
-    sane_val = iss.eof() && (value >= min) && (value <= max);
-  } else {
-    char* end = nullptr;
-    value = strtod(substring.c_str(), &end);
-    sane_val = *end == '\0' && value >= min && value <= max;
-  }
-  if (!sane_val) {
-    Usage("Invalid double value %s for option %s\n", substring.c_str(), option.c_str());
-  }
-  *parsed_value = value;
-}
-
 static constexpr size_t kMinDexFilesForSwap = 2;
 static constexpr size_t kMinDexFileCumulativeSizeForSwap = 20 * MB;
 
@@ -504,9 +479,10 @@ static bool UseSwap(bool is_image, std::vector<const DexFile*>& dex_files) {
 class Dex2Oat FINAL {
  public:
   explicit Dex2Oat(TimingLogger* timings) :
-      compiler_kind_(kUseOptimizingCompiler ? Compiler::kOptimizing : Compiler::kQuick),
+      compiler_kind_(Compiler::kOptimizing),
       instruction_set_(kRuntimeISA),
       // Take the default set of instruction features from the build.
+      verification_results_(nullptr),
       method_inliner_map_(),
       runtime_(nullptr),
       thread_count_(sysconf(_SC_NPROCESSORS_CONF)),
@@ -520,13 +496,18 @@ class Dex2Oat FINAL {
       compiled_classes_filename_(nullptr),
       compiled_methods_zip_filename_(nullptr),
       compiled_methods_filename_(nullptr),
-      image_(false),
+      app_image_(false),
+      boot_image_(false),
       is_host_(false),
+      image_writer_(nullptr),
+      driver_(nullptr),
       dump_stats_(false),
       dump_passes_(false),
       dump_timing_(false),
       dump_slow_timing_(kIsDebugBuild),
+      dump_cfg_append_(false),
       swap_fd_(-1),
+      app_image_fd_(kInvalidImageFd),
       timings_(timings) {}
 
   ~Dex2Oat() {
@@ -539,335 +520,120 @@ class Dex2Oat FINAL {
     // the runtime.
     LogCompletionTime();
 
-    if (kIsDebugBuild || (RUNNING_ON_VALGRIND != 0)) {
-      delete runtime_;  // See field declaration for why this is manual.
+    if (!kIsDebugBuild && !(RUNNING_ON_MEMORY_TOOL && kMemoryToolDetectsLeaks)) {
+      // We want to just exit on non-debug builds, not bringing the runtime down
+      // in an orderly fashion. So release the following fields.
+      driver_.release();
+      image_writer_.release();
+      for (std::unique_ptr<const DexFile>& dex_file : opened_dex_files_) {
+        dex_file.release();
+      }
+      oat_file_.release();
+      runtime_.release();
+      verification_results_.release();
+      key_value_store_.release();
     }
   }
 
-  // Parse the arguments from the command line. In case of an unrecognized option or impossible
-  // values/combinations, a usage error will be displayed and exit() is called. Thus, if the method
-  // returns, arguments have been successfully parsed.
-  void ParseArgs(int argc, char** argv) {
-    original_argc = argc;
-    original_argv = argv;
-
-    InitLogging(argv);
-
-    // Skip over argv[0].
-    argv++;
-    argc--;
-
-    if (argc == 0) {
-      Usage("No arguments specified");
-    }
-
+  struct ParserOptions {
     std::string oat_symbols;
     std::string boot_image_filename;
-    const char* compiler_filter_string = nullptr;
-    bool compile_pic = false;
-    int huge_method_threshold = CompilerOptions::kDefaultHugeMethodThreshold;
-    int large_method_threshold = CompilerOptions::kDefaultLargeMethodThreshold;
-    int small_method_threshold = CompilerOptions::kDefaultSmallMethodThreshold;
-    int tiny_method_threshold = CompilerOptions::kDefaultTinyMethodThreshold;
-    int num_dex_methods_threshold = CompilerOptions::kDefaultNumDexMethodsThreshold;
-    static constexpr int kUnsetInlineDepthLimit = -1;
-    int inline_depth_limit = kUnsetInlineDepthLimit;
-    static constexpr int kUnsetInlineMaxCodeUnits = -1;
-    int inline_max_code_units = kUnsetInlineMaxCodeUnits;
-
-    // Profile file to use
-    double top_k_profile_threshold = CompilerOptions::kDefaultTopKProfileThreshold;
-
-    bool debuggable = false;
-    bool include_patch_information = CompilerOptions::kDefaultIncludePatchInformation;
-    bool generate_debug_info = kIsDebugBuild;
     bool watch_dog_enabled = true;
-    bool abort_on_hard_verifier_error = false;
     bool requested_specific_compiler = false;
-
-    PassManagerOptions pass_manager_options;
-
     std::string error_msg;
+  };
 
-    for (int i = 0; i < argc; i++) {
-      const StringPiece option(argv[i]);
-      const bool log_options = false;
-      if (log_options) {
-        LOG(INFO) << "dex2oat: option[" << i << "]=" << argv[i];
-      }
-      if (option.starts_with("--dex-file=")) {
-        dex_filenames_.push_back(option.substr(strlen("--dex-file=")).data());
-      } else if (option.starts_with("--dex-location=")) {
-        dex_locations_.push_back(option.substr(strlen("--dex-location=")).data());
-      } else if (option.starts_with("--zip-fd=")) {
-        const char* zip_fd_str = option.substr(strlen("--zip-fd=")).data();
-        if (!ParseInt(zip_fd_str, &zip_fd_)) {
-          Usage("Failed to parse --zip-fd argument '%s' as an integer", zip_fd_str);
-        }
-        if (zip_fd_ < 0) {
-          Usage("--zip-fd passed a negative value %d", zip_fd_);
-        }
-      } else if (option.starts_with("--zip-location=")) {
-        zip_location_ = option.substr(strlen("--zip-location=")).data();
-      } else if (option.starts_with("--oat-file=")) {
-        oat_filename_ = option.substr(strlen("--oat-file=")).data();
-      } else if (option.starts_with("--oat-symbols=")) {
-        oat_symbols = option.substr(strlen("--oat-symbols=")).data();
-      } else if (option.starts_with("--oat-fd=")) {
-        const char* oat_fd_str = option.substr(strlen("--oat-fd=")).data();
-        if (!ParseInt(oat_fd_str, &oat_fd_)) {
-          Usage("Failed to parse --oat-fd argument '%s' as an integer", oat_fd_str);
-        }
-        if (oat_fd_ < 0) {
-          Usage("--oat-fd passed a negative value %d", oat_fd_);
-        }
-      } else if (option == "--watch-dog") {
-        watch_dog_enabled = true;
-      } else if (option == "--no-watch-dog") {
-        watch_dog_enabled = false;
-      } else if (option.starts_with("-j")) {
-        const char* thread_count_str = option.substr(strlen("-j")).data();
-        if (!ParseUint(thread_count_str, &thread_count_)) {
-          Usage("Failed to parse -j argument '%s' as an integer", thread_count_str);
-        }
-      } else if (option.starts_with("--oat-location=")) {
-        oat_location_ = option.substr(strlen("--oat-location=")).data();
-      } else if (option.starts_with("--image=")) {
-        image_filename_ = option.substr(strlen("--image=")).data();
-      } else if (option.starts_with("--image-classes=")) {
-        image_classes_filename_ = option.substr(strlen("--image-classes=")).data();
-      } else if (option.starts_with("--image-classes-zip=")) {
-        image_classes_zip_filename_ = option.substr(strlen("--image-classes-zip=")).data();
-      } else if (option.starts_with("--compiled-classes=")) {
-        compiled_classes_filename_ = option.substr(strlen("--compiled-classes=")).data();
-      } else if (option.starts_with("--compiled-classes-zip=")) {
-        compiled_classes_zip_filename_ = option.substr(strlen("--compiled-classes-zip=")).data();
-      } else if (option.starts_with("--compiled-methods=")) {
-        compiled_methods_filename_ = option.substr(strlen("--compiled-methods=")).data();
-      } else if (option.starts_with("--compiled-methods-zip=")) {
-        compiled_methods_zip_filename_ = option.substr(strlen("--compiled-methods-zip=")).data();
-      } else if (option.starts_with("--base=")) {
-        const char* image_base_str = option.substr(strlen("--base=")).data();
-        char* end;
-        image_base_ = strtoul(image_base_str, &end, 16);
-        if (end == image_base_str || *end != '\0') {
-          Usage("Failed to parse hexadecimal value for option %s", option.data());
-        }
-      } else if (option.starts_with("--boot-image=")) {
-        boot_image_filename = option.substr(strlen("--boot-image=")).data();
-      } else if (option.starts_with("--android-root=")) {
-        android_root_ = option.substr(strlen("--android-root=")).data();
-      } else if (option.starts_with("--instruction-set=")) {
-        StringPiece instruction_set_str = option.substr(strlen("--instruction-set=")).data();
-        // StringPiece is not necessarily zero-terminated, so need to make a copy and ensure it.
-        std::unique_ptr<char[]> buf(new char[instruction_set_str.length() + 1]);
-        strncpy(buf.get(), instruction_set_str.data(), instruction_set_str.length());
-        buf.get()[instruction_set_str.length()] = 0;
-        instruction_set_ = GetInstructionSetFromString(buf.get());
-        // arm actually means thumb2.
-        if (instruction_set_ == InstructionSet::kArm) {
-          instruction_set_ = InstructionSet::kThumb2;
-        }
-      } else if (option.starts_with("--instruction-set-variant=")) {
-        StringPiece str = option.substr(strlen("--instruction-set-variant=")).data();
-        instruction_set_features_.reset(
-            InstructionSetFeatures::FromVariant(instruction_set_, str.as_string(), &error_msg));
-        if (instruction_set_features_.get() == nullptr) {
-          Usage("%s", error_msg.c_str());
-        }
-      } else if (option.starts_with("--instruction-set-features=")) {
-        StringPiece str = option.substr(strlen("--instruction-set-features=")).data();
-        if (instruction_set_features_.get() == nullptr) {
-          instruction_set_features_.reset(
-              InstructionSetFeatures::FromVariant(instruction_set_, "default", &error_msg));
-          if (instruction_set_features_.get() == nullptr) {
-            Usage("Problem initializing default instruction set features variant: %s",
-                  error_msg.c_str());
-          }
-        }
-        instruction_set_features_.reset(
-            instruction_set_features_->AddFeaturesFromString(str.as_string(), &error_msg));
-        if (instruction_set_features_.get() == nullptr) {
-          Usage("Error parsing '%s': %s", option.data(), error_msg.c_str());
-        }
-      } else if (option.starts_with("--compiler-backend=")) {
-        requested_specific_compiler = true;
-        StringPiece backend_str = option.substr(strlen("--compiler-backend=")).data();
-        if (backend_str == "Quick") {
-          compiler_kind_ = Compiler::kQuick;
-        } else if (backend_str == "Optimizing") {
-          compiler_kind_ = Compiler::kOptimizing;
-        } else {
-          Usage("Unknown compiler backend: %s", backend_str.data());
-        }
-      } else if (option.starts_with("--compiler-filter=")) {
-        compiler_filter_string = option.substr(strlen("--compiler-filter=")).data();
-      } else if (option == "--compile-pic") {
-        compile_pic = true;
-      } else if (option.starts_with("--huge-method-max=")) {
-        const char* threshold = option.substr(strlen("--huge-method-max=")).data();
-        if (!ParseInt(threshold, &huge_method_threshold)) {
-          Usage("Failed to parse --huge-method-max '%s' as an integer", threshold);
-        }
-        if (huge_method_threshold < 0) {
-          Usage("--huge-method-max passed a negative value %s", huge_method_threshold);
-        }
-      } else if (option.starts_with("--large-method-max=")) {
-        const char* threshold = option.substr(strlen("--large-method-max=")).data();
-        if (!ParseInt(threshold, &large_method_threshold)) {
-          Usage("Failed to parse --large-method-max '%s' as an integer", threshold);
-        }
-        if (large_method_threshold < 0) {
-          Usage("--large-method-max passed a negative value %s", large_method_threshold);
-        }
-      } else if (option.starts_with("--small-method-max=")) {
-        const char* threshold = option.substr(strlen("--small-method-max=")).data();
-        if (!ParseInt(threshold, &small_method_threshold)) {
-          Usage("Failed to parse --small-method-max '%s' as an integer", threshold);
-        }
-        if (small_method_threshold < 0) {
-          Usage("--small-method-max passed a negative value %s", small_method_threshold);
-        }
-      } else if (option.starts_with("--tiny-method-max=")) {
-        const char* threshold = option.substr(strlen("--tiny-method-max=")).data();
-        if (!ParseInt(threshold, &tiny_method_threshold)) {
-          Usage("Failed to parse --tiny-method-max '%s' as an integer", threshold);
-        }
-        if (tiny_method_threshold < 0) {
-          Usage("--tiny-method-max passed a negative value %s", tiny_method_threshold);
-        }
-      } else if (option.starts_with("--num-dex-methods=")) {
-        const char* threshold = option.substr(strlen("--num-dex-methods=")).data();
-        if (!ParseInt(threshold, &num_dex_methods_threshold)) {
-          Usage("Failed to parse --num-dex-methods '%s' as an integer", threshold);
-        }
-        if (num_dex_methods_threshold < 0) {
-          Usage("--num-dex-methods passed a negative value %s", num_dex_methods_threshold);
-        }
-      } else if (option.starts_with("--inline-depth-limit=")) {
-        const char* limit = option.substr(strlen("--inline-depth-limit=")).data();
-        if (!ParseInt(limit, &inline_depth_limit)) {
-          Usage("Failed to parse --inline-depth-limit '%s' as an integer", limit);
-        }
-        if (inline_depth_limit < 0) {
-          Usage("--inline-depth-limit passed a negative value %s", inline_depth_limit);
-        }
-      } else if (option.starts_with("--inline-max-code-units=")) {
-        const char* code_units = option.substr(strlen("--inline-max-code-units=")).data();
-        if (!ParseInt(code_units, &inline_max_code_units)) {
-          Usage("Failed to parse --inline-max-code-units '%s' as an integer", code_units);
-        }
-        if (inline_max_code_units < 0) {
-          Usage("--inline-max-code-units passed a negative value %s", inline_max_code_units);
-        }
-      } else if (option == "--host") {
-        is_host_ = true;
-      } else if (option == "--runtime-arg") {
-        if (++i >= argc) {
-          Usage("Missing required argument for --runtime-arg");
-        }
-        if (log_options) {
-          LOG(INFO) << "dex2oat: option[" << i << "]=" << argv[i];
-        }
-        runtime_args_.push_back(argv[i]);
-      } else if (option == "--dump-timing") {
-        dump_timing_ = true;
-      } else if (option == "--dump-passes") {
-        dump_passes_ = true;
-      } else if (option.starts_with("--dump-cfg=")) {
-        dump_cfg_file_name_ = option.substr(strlen("--dump-cfg=")).data();
-      } else if (option == "--dump-stats") {
-        dump_stats_ = true;
-      } else if (option == "--generate-debug-info" || option == "-g") {
-        generate_debug_info = true;
-      } else if (option == "--no-generate-debug-info") {
-        generate_debug_info = false;
-      } else if (option == "--debuggable") {
-        debuggable = true;
-        generate_debug_info = true;
-      } else if (option.starts_with("--profile-file=")) {
-        profile_file_ = option.substr(strlen("--profile-file=")).data();
-        VLOG(compiler) << "dex2oat: profile file is " << profile_file_;
-      } else if (option == "--no-profile-file") {
-        // No profile
-      } else if (option.starts_with("--top-k-profile-threshold=")) {
-        ParseDouble(option.data(), '=', 0.0, 100.0, &top_k_profile_threshold);
-      } else if (option == "--print-pass-names") {
-        pass_manager_options.SetPrintPassNames(true);
-      } else if (option.starts_with("--disable-passes=")) {
-        const std::string disable_passes = option.substr(strlen("--disable-passes=")).data();
-        pass_manager_options.SetDisablePassList(disable_passes);
-      } else if (option.starts_with("--print-passes=")) {
-        const std::string print_passes = option.substr(strlen("--print-passes=")).data();
-        pass_manager_options.SetPrintPassList(print_passes);
-      } else if (option == "--print-all-passes") {
-        pass_manager_options.SetPrintAllPasses();
-      } else if (option.starts_with("--dump-cfg-passes=")) {
-        const std::string dump_passes_string = option.substr(strlen("--dump-cfg-passes=")).data();
-        pass_manager_options.SetDumpPassList(dump_passes_string);
-      } else if (option == "--print-pass-options") {
-        pass_manager_options.SetPrintPassOptions(true);
-      } else if (option.starts_with("--pass-options=")) {
-        const std::string options = option.substr(strlen("--pass-options=")).data();
-        pass_manager_options.SetOverriddenPassOptions(options);
-      } else if (option == "--include-patch-information") {
-        include_patch_information = true;
-      } else if (option == "--no-include-patch-information") {
-        include_patch_information = false;
-      } else if (option.starts_with("--verbose-methods=")) {
-        // TODO: rather than switch off compiler logging, make all VLOG(compiler) messages
-        //       conditional on having verbost methods.
-        gLogVerbosity.compiler = false;
-        Split(option.substr(strlen("--verbose-methods=")).ToString(), ',', &verbose_methods_);
-      } else if (option.starts_with("--dump-init-failures=")) {
-        std::string file_name = option.substr(strlen("--dump-init-failures=")).data();
-        init_failure_output_.reset(new std::ofstream(file_name));
-        if (init_failure_output_.get() == nullptr) {
-          LOG(ERROR) << "Failed to allocate ofstream";
-        } else if (init_failure_output_->fail()) {
-          LOG(ERROR) << "Failed to open " << file_name << " for writing the initialization "
-                     << "failures.";
-          init_failure_output_.reset();
-        }
-      } else if (option.starts_with("--swap-file=")) {
-        swap_file_name_ = option.substr(strlen("--swap-file=")).data();
-      } else if (option.starts_with("--swap-fd=")) {
-        const char* swap_fd_str = option.substr(strlen("--swap-fd=")).data();
-        if (!ParseInt(swap_fd_str, &swap_fd_)) {
-          Usage("Failed to parse --swap-fd argument '%s' as an integer", swap_fd_str);
-        }
-        if (swap_fd_ < 0) {
-          Usage("--swap-fd passed a negative value %d", swap_fd_);
-        }
-      } else if (option == "--abort-on-hard-verifier-error") {
-        abort_on_hard_verifier_error = true;
-      } else {
-        Usage("Unknown argument %s", option.data());
+  void ParseZipFd(const StringPiece& option) {
+    ParseUintOption(option, "--zip-fd", &zip_fd_, Usage);
+  }
+
+  void ParseOatFd(const StringPiece& option) {
+    ParseUintOption(option, "--oat-fd", &oat_fd_, Usage);
+  }
+
+  void ParseJ(const StringPiece& option) {
+    ParseUintOption(option, "-j", &thread_count_, Usage, /* is_long_option */ false);
+  }
+
+  void ParseBase(const StringPiece& option) {
+    DCHECK(option.starts_with("--base="));
+    const char* image_base_str = option.substr(strlen("--base=")).data();
+    char* end;
+    image_base_ = strtoul(image_base_str, &end, 16);
+    if (end == image_base_str || *end != '\0') {
+      Usage("Failed to parse hexadecimal value for option %s", option.data());
+    }
+  }
+
+  void ParseInstructionSet(const StringPiece& option) {
+    DCHECK(option.starts_with("--instruction-set="));
+    StringPiece instruction_set_str = option.substr(strlen("--instruction-set=")).data();
+    // StringPiece is not necessarily zero-terminated, so need to make a copy and ensure it.
+    std::unique_ptr<char[]> buf(new char[instruction_set_str.length() + 1]);
+    strncpy(buf.get(), instruction_set_str.data(), instruction_set_str.length());
+    buf.get()[instruction_set_str.length()] = 0;
+    instruction_set_ = GetInstructionSetFromString(buf.get());
+    // arm actually means thumb2.
+    if (instruction_set_ == InstructionSet::kArm) {
+      instruction_set_ = InstructionSet::kThumb2;
+    }
+  }
+
+  void ParseInstructionSetVariant(const StringPiece& option, ParserOptions* parser_options) {
+    DCHECK(option.starts_with("--instruction-set-variant="));
+    StringPiece str = option.substr(strlen("--instruction-set-variant=")).data();
+    instruction_set_features_.reset(
+        InstructionSetFeatures::FromVariant(
+            instruction_set_, str.as_string(), &parser_options->error_msg));
+    if (instruction_set_features_.get() == nullptr) {
+      Usage("%s", parser_options->error_msg.c_str());
+    }
+  }
+
+  void ParseInstructionSetFeatures(const StringPiece& option, ParserOptions* parser_options) {
+    DCHECK(option.starts_with("--instruction-set-features="));
+    StringPiece str = option.substr(strlen("--instruction-set-features=")).data();
+    if (instruction_set_features_.get() == nullptr) {
+      instruction_set_features_.reset(
+          InstructionSetFeatures::FromVariant(
+              instruction_set_, "default", &parser_options->error_msg));
+      if (instruction_set_features_.get() == nullptr) {
+        Usage("Problem initializing default instruction set features variant: %s",
+              parser_options->error_msg.c_str());
       }
     }
-
-    // Override the number of compiler threads with optimal value (thru system property)
-    #ifdef HAVE_ANDROID_OS
-    const char* propertyName = "ro.sys.fw.dex2oat_thread_count";
-    char thread_count_str[PROPERTY_VALUE_MAX];
-
-    if (property_get(propertyName, thread_count_str, "") > 0) {
-        if (ParseUint(thread_count_str, &thread_count_)) {
-            LOG(INFO) << "Adjusted thread count (for runtime dex2oat): " << thread_count_ << ", " << thread_count_str;
-        }
+    instruction_set_features_.reset(
+        instruction_set_features_->AddFeaturesFromString(str.as_string(),
+                                                         &parser_options->error_msg));
+    if (instruction_set_features_.get() == nullptr) {
+      Usage("Error parsing '%s': %s", option.data(), parser_options->error_msg.c_str());
     }
-    #endif
+  }
 
-    image_ = (!image_filename_.empty());
-    if (!requested_specific_compiler && !kUseOptimizingCompiler) {
-      // If no specific compiler is requested, the current behavior is
-      // to compile the boot image with Quick, and the rest with Optimizing.
-      compiler_kind_ = image_ ? Compiler::kQuick : Compiler::kOptimizing;
+  void ParseCompilerBackend(const StringPiece& option, ParserOptions* parser_options) {
+    DCHECK(option.starts_with("--compiler-backend="));
+    parser_options->requested_specific_compiler = true;
+    StringPiece backend_str = option.substr(strlen("--compiler-backend=")).data();
+    if (backend_str == "Quick") {
+      compiler_kind_ = Compiler::kQuick;
+    } else if (backend_str == "Optimizing") {
+      compiler_kind_ = Compiler::kOptimizing;
+    } else {
+      Usage("Unknown compiler backend: %s", backend_str.data());
+    }
+  }
+
+  void ProcessOptions(ParserOptions* parser_options) {
+    boot_image_ = !image_filename_.empty();
+    app_image_ = app_image_fd_ != -1 || !app_image_file_name_.empty();
+
+    if (IsAppImage() && IsBootImage()) {
+      Usage("Can't have both --image and (--app-image-fd or --app-image-file)");
     }
 
-    if (compiler_kind_ == Compiler::kOptimizing) {
-      // Optimizing only supports PIC mode.
-      compile_pic = true;
+    if (IsBootImage()) {
+      // We need the boot image to always be debuggable.
+      compiler_options_->debuggable_ = true;
     }
 
     if (oat_filename_.empty() && oat_fd_ == -1) {
@@ -878,11 +644,11 @@ class Dex2Oat FINAL {
       Usage("--oat-file should not be used with --oat-fd");
     }
 
-    if (!oat_symbols.empty() && oat_fd_ != -1) {
+    if (!parser_options->oat_symbols.empty() && oat_fd_ != -1) {
       Usage("--oat-symbols should not be used with --oat-fd");
     }
 
-    if (!oat_symbols.empty() && is_host_) {
+    if (!parser_options->oat_symbols.empty() && is_host_) {
       Usage("--oat-symbols should not be used with --host");
     }
 
@@ -898,16 +664,16 @@ class Dex2Oat FINAL {
       android_root_ += android_root_env_var;
     }
 
-    if (!image_ && boot_image_filename.empty()) {
-      boot_image_filename += android_root_;
-      boot_image_filename += "/framework/boot.art";
+    if (!boot_image_ && parser_options->boot_image_filename.empty()) {
+      parser_options->boot_image_filename += android_root_;
+      parser_options->boot_image_filename += "/framework/boot.art";
     }
-    if (!boot_image_filename.empty()) {
+    if (!parser_options->boot_image_filename.empty()) {
       boot_image_option_ += "-Ximage:";
-      boot_image_option_ += boot_image_filename;
+      boot_image_option_ += parser_options->boot_image_filename;
     }
 
-    if (image_classes_filename_ != nullptr && !image_) {
+    if (image_classes_filename_ != nullptr && !IsBootImage()) {
       Usage("--image-classes should only be used with --image");
     }
 
@@ -919,7 +685,7 @@ class Dex2Oat FINAL {
       Usage("--image-classes-zip should be used with --image-classes");
     }
 
-    if (compiled_classes_filename_ != nullptr && !image_) {
+    if (compiled_classes_filename_ != nullptr && !IsBootImage()) {
       Usage("--compiled-classes should only be used with --image");
     }
 
@@ -962,8 +728,8 @@ class Dex2Oat FINAL {
     }
 
     oat_stripped_ = oat_filename_;
-    if (!oat_symbols.empty()) {
-      oat_unstripped_ = oat_symbols;
+    if (!parser_options->oat_symbols.empty()) {
+      oat_unstripped_ = parser_options->oat_symbols;
     } else {
       oat_unstripped_ = oat_filename_;
     }
@@ -972,10 +738,11 @@ class Dex2Oat FINAL {
     // instruction set.
     if (instruction_set_features_.get() == nullptr) {
       instruction_set_features_.reset(
-          InstructionSetFeatures::FromVariant(instruction_set_, "default", &error_msg));
+          InstructionSetFeatures::FromVariant(
+              instruction_set_, "default", &parser_options->error_msg));
       if (instruction_set_features_.get() == nullptr) {
         Usage("Problem initializing default instruction set features variant: %s",
-              error_msg.c_str());
+              parser_options->error_msg.c_str());
       }
     }
 
@@ -990,52 +757,25 @@ class Dex2Oat FINAL {
       }
     }
 
-    if (compiler_filter_string == nullptr) {
-      compiler_filter_string = "speed";
-    }
-
-    CHECK(compiler_filter_string != nullptr);
-    CompilerOptions::CompilerFilter compiler_filter = CompilerOptions::kDefaultCompilerFilter;
-    if (strcmp(compiler_filter_string, "verify-none") == 0) {
-      compiler_filter = CompilerOptions::kVerifyNone;
-    } else if (strcmp(compiler_filter_string, "interpret-only") == 0) {
-      compiler_filter = CompilerOptions::kInterpretOnly;
-    } else if (strcmp(compiler_filter_string, "verify-at-runtime") == 0) {
-      compiler_filter = CompilerOptions::kVerifyAtRuntime;
-    } else if (strcmp(compiler_filter_string, "space") == 0) {
-      compiler_filter = CompilerOptions::kSpace;
-    } else if (strcmp(compiler_filter_string, "balanced") == 0) {
-      compiler_filter = CompilerOptions::kBalanced;
-    } else if (strcmp(compiler_filter_string, "speed") == 0) {
-      compiler_filter = CompilerOptions::kSpeed;
-    } else if (strcmp(compiler_filter_string, "everything") == 0) {
-      compiler_filter = CompilerOptions::kEverything;
-    } else if (strcmp(compiler_filter_string, "time") == 0) {
-      compiler_filter = CompilerOptions::kTime;
-    } else {
-      Usage("Unknown --compiler-filter value %s", compiler_filter_string);
-    }
-
     // It they are not set, use default values for inlining settings.
     // TODO: We should rethink the compiler filter. We mostly save
     // time here, which is orthogonal to space.
-    if (inline_depth_limit == kUnsetInlineDepthLimit) {
-      inline_depth_limit = (compiler_filter == CompilerOptions::kSpace)
+    if (compiler_options_->inline_depth_limit_ == CompilerOptions::kUnsetInlineDepthLimit) {
+      compiler_options_->inline_depth_limit_ =
+          (compiler_options_->compiler_filter_ == CompilerOptions::kSpace)
           // Implementation of the space filter: limit inlining depth.
           ? CompilerOptions::kSpaceFilterInlineDepthLimit
           : CompilerOptions::kDefaultInlineDepthLimit;
     }
-    if (inline_max_code_units == kUnsetInlineMaxCodeUnits) {
-      inline_max_code_units = (compiler_filter == CompilerOptions::kSpace)
+    if (compiler_options_->inline_max_code_units_ == CompilerOptions::kUnsetInlineMaxCodeUnits) {
+      compiler_options_->inline_max_code_units_ =
+          (compiler_options_->compiler_filter_ == CompilerOptions::kSpace)
           // Implementation of the space filter: limit inlining max code units.
           ? CompilerOptions::kSpaceFilterInlineMaxCodeUnits
           : CompilerOptions::kDefaultInlineMaxCodeUnits;
     }
 
     // Checks are all explicit until we know the architecture.
-    bool implicit_null_checks = false;
-    bool implicit_so_checks = false;
-    bool implicit_suspend_checks = false;
     // Set the compilation target's implicit checks options.
     switch (instruction_set_) {
       case kArm:
@@ -1045,8 +785,8 @@ class Dex2Oat FINAL {
       case kX86_64:
       case kMips:
       case kMips64:
-        implicit_null_checks = true;
-        implicit_so_checks = true;
+        compiler_options_->implicit_null_checks_ = true;
+        compiler_options_->implicit_so_checks_ = true;
         break;
 
       default:
@@ -1054,55 +794,160 @@ class Dex2Oat FINAL {
         break;
     }
 
-    compiler_options_.reset(new CompilerOptions(compiler_filter,
-                                                huge_method_threshold,
-                                                large_method_threshold,
-                                                small_method_threshold,
-                                                tiny_method_threshold,
-                                                num_dex_methods_threshold,
-                                                inline_depth_limit,
-                                                inline_max_code_units,
-                                                include_patch_information,
-                                                top_k_profile_threshold,
-                                                debuggable,
-                                                generate_debug_info,
-                                                implicit_null_checks,
-                                                implicit_so_checks,
-                                                implicit_suspend_checks,
-                                                compile_pic,
-                                                verbose_methods_.empty() ?
-                                                    nullptr :
-                                                    &verbose_methods_,
-                                                new PassManagerOptions(pass_manager_options),
-                                                init_failure_output_.get(),
-                                                abort_on_hard_verifier_error));
+    compiler_options_->verbose_methods_ = verbose_methods_.empty() ? nullptr : &verbose_methods_;
 
     // Done with usage checks, enable watchdog if requested
-    if (watch_dog_enabled) {
+    if (parser_options->watch_dog_enabled) {
       watchdog_.reset(new WatchDog(true));
     }
 
     // Fill some values into the key-value store for the oat header.
     key_value_store_.reset(new SafeMap<std::string, std::string>());
+  }
+
+  void InsertCompileOptions(int argc, char** argv) {
+    std::ostringstream oss;
+    for (int i = 0; i < argc; ++i) {
+      if (i > 0) {
+        oss << ' ';
+      }
+      oss << argv[i];
+    }
+    key_value_store_->Put(OatHeader::kDex2OatCmdLineKey, oss.str());
+    oss.str("");  // Reset.
+    oss << kRuntimeISA;
+    key_value_store_->Put(OatHeader::kDex2OatHostKey, oss.str());
+    key_value_store_->Put(
+        OatHeader::kPicKey,
+        compiler_options_->compile_pic_ ? OatHeader::kTrueValue : OatHeader::kFalseValue);
+    key_value_store_->Put(
+        OatHeader::kDebuggableKey,
+        compiler_options_->debuggable_ ? OatHeader::kTrueValue : OatHeader::kFalseValue);
+  }
+
+  // Parse the arguments from the command line. In case of an unrecognized option or impossible
+  // values/combinations, a usage error will be displayed and exit() is called. Thus, if the method
+  // returns, arguments have been successfully parsed.
+  void ParseArgs(int argc, char** argv) {
+    original_argc = argc;
+    original_argv = argv;
+
+    InitLogging(argv);
+
+    // Skip over argv[0].
+    argv++;
+    argc--;
+
+    if (argc == 0) {
+      Usage("No arguments specified");
+    }
+
+    std::unique_ptr<ParserOptions> parser_options(new ParserOptions());
+    compiler_options_.reset(new CompilerOptions());
+
+    for (int i = 0; i < argc; i++) {
+      const StringPiece option(argv[i]);
+      const bool log_options = false;
+      if (log_options) {
+        LOG(INFO) << "dex2oat: option[" << i << "]=" << argv[i];
+      }
+      if (option.starts_with("--dex-file=")) {
+        dex_filenames_.push_back(option.substr(strlen("--dex-file=")).data());
+      } else if (option.starts_with("--dex-location=")) {
+        dex_locations_.push_back(option.substr(strlen("--dex-location=")).data());
+      } else if (option.starts_with("--zip-fd=")) {
+        ParseZipFd(option);
+      } else if (option.starts_with("--zip-location=")) {
+        zip_location_ = option.substr(strlen("--zip-location=")).data();
+      } else if (option.starts_with("--oat-file=")) {
+        oat_filename_ = option.substr(strlen("--oat-file=")).data();
+      } else if (option.starts_with("--oat-symbols=")) {
+        parser_options->oat_symbols = option.substr(strlen("--oat-symbols=")).data();
+      } else if (option.starts_with("--oat-fd=")) {
+        ParseOatFd(option);
+      } else if (option == "--watch-dog") {
+        parser_options->watch_dog_enabled = true;
+      } else if (option == "--no-watch-dog") {
+        parser_options->watch_dog_enabled = false;
+      } else if (option.starts_with("-j")) {
+        ParseJ(option);
+      } else if (option.starts_with("--oat-location=")) {
+        oat_location_ = option.substr(strlen("--oat-location=")).data();
+      } else if (option.starts_with("--image=")) {
+        image_filename_ = option.substr(strlen("--image=")).data();
+      } else if (option.starts_with("--image-classes=")) {
+        image_classes_filename_ = option.substr(strlen("--image-classes=")).data();
+      } else if (option.starts_with("--image-classes-zip=")) {
+        image_classes_zip_filename_ = option.substr(strlen("--image-classes-zip=")).data();
+      } else if (option.starts_with("--compiled-classes=")) {
+        compiled_classes_filename_ = option.substr(strlen("--compiled-classes=")).data();
+      } else if (option.starts_with("--compiled-classes-zip=")) {
+        compiled_classes_zip_filename_ = option.substr(strlen("--compiled-classes-zip=")).data();
+      } else if (option.starts_with("--compiled-methods=")) {
+        compiled_methods_filename_ = option.substr(strlen("--compiled-methods=")).data();
+      } else if (option.starts_with("--compiled-methods-zip=")) {
+        compiled_methods_zip_filename_ = option.substr(strlen("--compiled-methods-zip=")).data();
+      } else if (option.starts_with("--base=")) {
+        ParseBase(option);
+      } else if (option.starts_with("--boot-image=")) {
+        parser_options->boot_image_filename = option.substr(strlen("--boot-image=")).data();
+      } else if (option.starts_with("--android-root=")) {
+        android_root_ = option.substr(strlen("--android-root=")).data();
+      } else if (option.starts_with("--instruction-set=")) {
+        ParseInstructionSet(option);
+      } else if (option.starts_with("--instruction-set-variant=")) {
+        ParseInstructionSetVariant(option, parser_options.get());
+      } else if (option.starts_with("--instruction-set-features=")) {
+        ParseInstructionSetFeatures(option, parser_options.get());
+      } else if (option.starts_with("--compiler-backend=")) {
+        ParseCompilerBackend(option, parser_options.get());
+      } else if (option.starts_with("--profile-file=")) {
+        profile_file_ = option.substr(strlen("--profile-file=")).data();
+        VLOG(compiler) << "dex2oat: profile file is " << profile_file_;
+      } else if (option == "--no-profile-file") {
+        // No profile
+      } else if (option == "--host") {
+        is_host_ = true;
+      } else if (option == "--runtime-arg") {
+        if (++i >= argc) {
+          Usage("Missing required argument for --runtime-arg");
+        }
+        if (log_options) {
+          LOG(INFO) << "dex2oat: option[" << i << "]=" << argv[i];
+        }
+        runtime_args_.push_back(argv[i]);
+      } else if (option == "--dump-timing") {
+        dump_timing_ = true;
+      } else if (option == "--dump-passes") {
+        dump_passes_ = true;
+      } else if (option.starts_with("--dump-cfg=")) {
+        dump_cfg_file_name_ = option.substr(strlen("--dump-cfg=")).data();
+      } else if (option.starts_with("--dump-cfg-append")) {
+        dump_cfg_append_ = true;
+      } else if (option == "--dump-stats") {
+        dump_stats_ = true;
+      } else if (option.starts_with("--swap-file=")) {
+        swap_file_name_ = option.substr(strlen("--swap-file=")).data();
+      } else if (option.starts_with("--swap-fd=")) {
+        ParseUintOption(option, "--swap-fd", &swap_fd_, Usage);
+      } else if (option.starts_with("--app-image-file=")) {
+        app_image_file_name_ = option.substr(strlen("--app-image-file=")).data();
+      } else if (option.starts_with("--app-image-fd=")) {
+        ParseUintOption(option, "--app-image-fd", &app_image_fd_, Usage);
+      } else if (option.starts_with("--verbose-methods=")) {
+        // TODO: rather than switch off compiler logging, make all VLOG(compiler) messages
+        //       conditional on having verbost methods.
+        gLogVerbosity.compiler = false;
+        Split(option.substr(strlen("--verbose-methods=")).ToString(), ',', &verbose_methods_);
+      } else if (!compiler_options_->ParseCompilerOption(option, Usage)) {
+        Usage("Unknown argument %s", option.data());
+      }
+    }
+
+    ProcessOptions(parser_options.get());
 
     // Insert some compiler things.
-    {
-      std::ostringstream oss;
-      for (int i = 0; i < argc; ++i) {
-        if (i > 0) {
-          oss << ' ';
-        }
-        oss << argv[i];
-      }
-      key_value_store_->Put(OatHeader::kDex2OatCmdLineKey, oss.str());
-      oss.str("");  // Reset.
-      oss << kRuntimeISA;
-      key_value_store_->Put(OatHeader::kDex2OatHostKey, oss.str());
-      key_value_store_->Put(OatHeader::kPicKey,
-                            compile_pic ? OatHeader::kTrueValue : OatHeader::kFalseValue);
-      key_value_store_->Put(OatHeader::kDebuggableKey,
-                            debuggable ? OatHeader::kTrueValue : OatHeader::kFalseValue);
-    }
+    InsertCompileOptions(argc, argv);
   }
 
   // Check whether the oat output file is writable, and open it for later. Also open a swap file,
@@ -1110,10 +955,6 @@ class Dex2Oat FINAL {
   bool OpenFile() {
     bool create_file = !oat_unstripped_.empty();  // as opposed to using open file descriptor
     if (create_file) {
-      // We're supposed to create this file. If the file already exists, it may be in use currently.
-      // We must not change the content of that file, then. So unlink it first.
-      unlink(oat_unstripped_.c_str());
-
       oat_file_.reset(OS::CreateEmptyFile(oat_unstripped_.c_str()));
       if (oat_location_.empty()) {
         oat_location_ = oat_filename_;
@@ -1154,7 +995,6 @@ class Dex2Oat FINAL {
                                       // released immediately.
       unlink(swap_file_name_.c_str());
     }
-
     return true;
   }
 
@@ -1162,6 +1002,14 @@ class Dex2Oat FINAL {
     DCHECK(oat_file_.get() != nullptr);
     oat_file_->Erase();
     oat_file_.reset();
+  }
+
+  void Shutdown() {
+    ScopedObjectAccess soa(Thread::Current());
+    for (jobject dex_cache : dex_caches_) {
+      soa.Env()->DeleteLocalRef(dex_cache);
+    }
+    dex_caches_.clear();
   }
 
   // Set up the environment for compilation. Includes starting the runtime and loading/opening the
@@ -1188,7 +1036,7 @@ class Dex2Oat FINAL {
     callbacks_.reset(new QuickCompilerCallbacks(
         verification_results_.get(),
         &method_inliner_map_,
-        image_ ?
+        IsBootImage() ?
             CompilerCallbacks::CallbackMode::kCompileBootImage :
             CompilerCallbacks::CallbackMode::kCompileApp));
     runtime_options.push_back(std::make_pair("compilercallbacks", callbacks_.get()));
@@ -1198,9 +1046,12 @@ class Dex2Oat FINAL {
     // Only allow no boot image for the runtime if we're compiling one. When we compile an app,
     // we don't want fallback mode, it will abort as we do not push a boot classpath (it might
     // have been stripped in preopting, anyways).
-    if (!image_) {
+    if (!IsBootImage()) {
       runtime_options.push_back(std::make_pair("-Xno-dex-file-fallback", nullptr));
     }
+    // Disable libsigchain. We don't don't need it during compilation and it prevents us
+    // from getting a statically linked version of dex2oat (because of dlsym and RTLD_NEXT).
+    runtime_options.push_back(std::make_pair("-Xno-sig-chain", nullptr));
 
     {
       TimingLogger::ScopedTiming t_runtime("Create runtime", timings_);
@@ -1234,7 +1085,7 @@ class Dex2Oat FINAL {
             "': " << error_msg;
         return false;
       }
-    } else if (image_) {
+    } else if (IsBootImage()) {
       image_classes_.reset(new std::unordered_set<std::string>);
     }
     // If --compiled-classes was specified, calculate the full list of classes to compile in the
@@ -1277,8 +1128,9 @@ class Dex2Oat FINAL {
       compiled_methods_.reset(nullptr);  // By default compile everything.
     }
 
+    ClassLinker* const class_linker = Runtime::Current()->GetClassLinker();
     if (boot_image_option_.empty()) {
-      dex_files_ = Runtime::Current()->GetClassLinker()->GetBootClassPath();
+      dex_files_ = class_linker->GetBootClassPath();
     } else {
       TimingLogger::ScopedTiming t_dex("Opening dex files", timings_);
       if (dex_filenames_.empty()) {
@@ -1332,16 +1184,21 @@ class Dex2Oat FINAL {
         }
       }
     }
-    // Ensure opened dex files are writable for dex-to-dex transformations.
+    // Ensure opened dex files are writable for dex-to-dex transformations. Also ensure that
+    // the dex caches stay live since we don't want class unloading to occur during compilation.
     for (const auto& dex_file : dex_files_) {
       if (!dex_file->EnableWrite()) {
         PLOG(ERROR) << "Failed to make .dex file writeable '" << dex_file->GetLocation() << "'\n";
       }
+      ScopedObjectAccess soa(self);
+      dex_caches_.push_back(soa.AddLocalReference<jobject>(
+          class_linker->RegisterDexFile(*dex_file, Runtime::Current()->GetLinearAlloc())));
+      dex_file->CreateTypeLookupTable();
     }
 
     // If we use a swap file, ensure we are above the threshold to make it necessary.
     if (swap_fd_ != -1) {
-      if (!UseSwap(image_, dex_files_)) {
+      if (!UseSwap(IsBootImage(), dex_files_)) {
         close(swap_fd_);
         swap_fd_ = -1;
         VLOG(compiler) << "Decided to run without swap.";
@@ -1355,7 +1212,7 @@ class Dex2Oat FINAL {
      * If we're not in interpret-only or verify-none mode, go ahead and compile small applications.
      * Don't bother to check if we're doing the image.
      */
-    if (!image_ &&
+    if (!IsBootImage() &&
         compiler_options_->IsCompilationEnabled() &&
         compiler_kind_ == Compiler::kQuick) {
       size_t num_methods = 0;
@@ -1380,7 +1237,9 @@ class Dex2Oat FINAL {
 
     // Handle and ClassLoader creation needs to come after Runtime::Create
     jobject class_loader = nullptr;
+    jobject class_path_class_loader = nullptr;
     Thread* self = Thread::Current();
+
     if (!boot_image_option_.empty()) {
       ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
       OpenClassPathFiles(runtime_->GetClassPathString(), dex_files_, &class_path_files_);
@@ -1396,10 +1255,12 @@ class Dex2Oat FINAL {
       key_value_store_->Put(OatHeader::kClassPathKey,
                             OatFile::EncodeDexFileDependencies(class_path_files));
 
-      // Then the dex files we'll compile. Thus we'll resolve the class-path first.
-      class_path_files.insert(class_path_files.end(), dex_files_.begin(), dex_files_.end());
+      class_path_class_loader = class_linker->CreatePathClassLoader(self,
+                                                                    class_path_files,
+                                                                    nullptr);
 
-      class_loader = class_linker->CreatePathClassLoader(self, class_path_files);
+      // Class path loader as parent so that we'll resolve there first.
+      class_loader = class_linker->CreatePathClassLoader(self, dex_files_, class_path_class_loader);
     }
 
     driver_.reset(new CompilerDriver(compiler_options_.get(),
@@ -1408,7 +1269,7 @@ class Dex2Oat FINAL {
                                      compiler_kind_,
                                      instruction_set_,
                                      instruction_set_features_.get(),
-                                     image_,
+                                     IsBootImage(),
                                      image_classes_.release(),
                                      compiled_classes_.release(),
                                      nullptr,
@@ -1416,10 +1277,12 @@ class Dex2Oat FINAL {
                                      dump_stats_,
                                      dump_passes_,
                                      dump_cfg_file_name_,
+                                     dump_cfg_append_,
                                      compiler_phases_timings_.get(),
                                      swap_fd_,
                                      profile_file_));
 
+    driver_->SetDexFilesForOatFile(dex_files_);
     driver_->CompileAll(class_loader, dex_files_, timings_);
   }
 
@@ -1501,11 +1364,22 @@ class Dex2Oat FINAL {
       uint32_t image_file_location_oat_checksum = 0;
       uintptr_t image_file_location_oat_data_begin = 0;
       int32_t image_patch_delta = 0;
-      if (image_) {
+
+      if (app_image_ && image_base_ == 0) {
+        gc::space::ImageSpace* image_space = Runtime::Current()->GetHeap()->GetBootImageSpace();
+        image_base_ = RoundUp(
+            reinterpret_cast<uintptr_t>(image_space->GetImageHeader().GetOatFileEnd()),
+            kPageSize);
+        VLOG(compiler) << "App image base=" << reinterpret_cast<void*>(image_base_);
+      }
+
+      if (IsImage()) {
         PrepareImageWriter(image_base_);
-      } else {
+      }
+
+      if (!IsBootImage()) {
         TimingLogger::ScopedTiming t3("Loading image checksum", timings_);
-        gc::space::ImageSpace* image_space = Runtime::Current()->GetHeap()->GetImageSpace();
+        gc::space::ImageSpace* image_space = Runtime::Current()->GetHeap()->GetBootImageSpace();
         image_file_location_oat_checksum = image_space->GetImageHeader().GetOatChecksum();
         image_file_location_oat_data_begin =
             reinterpret_cast<uintptr_t>(image_space->GetImageHeader().GetOatDataBegin());
@@ -1517,16 +1391,18 @@ class Dex2Oat FINAL {
         key_value_store_->Put(OatHeader::kImageLocationKey, image_file_location);
       }
 
-      oat_writer.reset(new OatWriter(dex_files_, image_file_location_oat_checksum,
+      oat_writer.reset(new OatWriter(dex_files_,
+                                     image_file_location_oat_checksum,
                                      image_file_location_oat_data_begin,
                                      image_patch_delta,
                                      driver_.get(),
                                      image_writer_.get(),
+                                     IsBootImage(),
                                      timings_,
                                      key_value_store_.get()));
     }
 
-    if (image_) {
+    if (IsImage()) {
       // The OatWriter constructor has already updated offsets in methods and we need to
       // prepare method offsets in the image address space for direct method patching.
       TimingLogger::ScopedTiming t2("dex2oat Prepare image address space", timings_);
@@ -1538,8 +1414,36 @@ class Dex2Oat FINAL {
 
     {
       TimingLogger::ScopedTiming t2("dex2oat Write ELF", timings_);
-      if (!driver_->WriteElf(android_root_, is_host_, dex_files_, oat_writer.get(),
-                             oat_file_.get())) {
+      std::unique_ptr<ElfWriter> elf_writer =
+          CreateElfWriterQuick(instruction_set_, compiler_options_.get(), oat_file_.get());
+
+      elf_writer->Start();
+
+      OutputStream* rodata = elf_writer->StartRoData();
+      if (!oat_writer->WriteRodata(rodata)) {
+        LOG(ERROR) << "Failed to write .rodata section to the ELF file " << oat_file_->GetPath();
+        return false;
+      }
+      elf_writer->EndRoData(rodata);
+
+      OutputStream* text = elf_writer->StartText();
+      if (!oat_writer->WriteCode(text)) {
+        LOG(ERROR) << "Failed to write .text section to the ELF file " << oat_file_->GetPath();
+        return false;
+      }
+      elf_writer->EndText(text);
+
+      elf_writer->SetBssSize(oat_writer->GetBssSize());
+
+      elf_writer->WriteDynamicSection();
+
+      ArrayRef<const dwarf::MethodDebugInfo> method_infos(oat_writer->GetMethodDebugInfo());
+      elf_writer->WriteDebugInfo(method_infos);
+
+      ArrayRef<const uintptr_t> patch_locations(oat_writer->GetAbsolutePatchLocations());
+      elf_writer->WritePatchLocations(patch_locations);
+
+      if (!elf_writer->End()) {
         LOG(ERROR) << "Failed to write ELF file " << oat_file_->GetPath();
         return false;
       }
@@ -1551,7 +1455,7 @@ class Dex2Oat FINAL {
 
   // If we are compiling an image, invoke the image creation routine. Else just skip.
   bool HandleImage() {
-    if (image_) {
+    if (IsImage()) {
       TimingLogger::ScopedTiming t("dex2oat ImageWriter", timings_);
       if (!CreateImageFile()) {
         return false;
@@ -1634,7 +1538,15 @@ class Dex2Oat FINAL {
   }
 
   bool IsImage() const {
-    return image_;
+    return IsAppImage() || IsBootImage();
+  }
+
+  bool IsAppImage() const {
+    return app_image_;
+  }
+
+  bool IsBootImage() const {
+    return boot_image_;
   }
 
   bool IsHost() const {
@@ -1709,35 +1621,41 @@ class Dex2Oat FINAL {
       LOG(ERROR) << "Failed to create runtime";
       return false;
     }
-    Runtime* runtime = Runtime::Current();
-    runtime->SetInstructionSet(instruction_set_);
+    runtime_.reset(Runtime::Current());
+    runtime_->SetInstructionSet(instruction_set_);
     for (int i = 0; i < Runtime::kLastCalleeSaveType; i++) {
       Runtime::CalleeSaveType type = Runtime::CalleeSaveType(i);
-      if (!runtime->HasCalleeSaveMethod(type)) {
-        runtime->SetCalleeSaveMethod(runtime->CreateCalleeSaveMethod(), type);
+      if (!runtime_->HasCalleeSaveMethod(type)) {
+        runtime_->SetCalleeSaveMethod(runtime_->CreateCalleeSaveMethod(), type);
       }
     }
-    runtime->GetClassLinker()->FixupDexCaches(runtime->GetResolutionMethod());
+    runtime_->GetClassLinker()->FixupDexCaches(runtime_->GetResolutionMethod());
 
     // Initialize maps for unstarted runtime. This needs to be here, as running clinits needs this
     // set up.
     interpreter::UnstartedRuntime::Initialize();
 
-    runtime->GetClassLinker()->RunRootClinits();
-    runtime_ = runtime;
+    runtime_->GetClassLinker()->RunRootClinits();
 
     return true;
   }
 
   void PrepareImageWriter(uintptr_t image_base) {
-    image_writer_.reset(new ImageWriter(*driver_, image_base, compiler_options_->GetCompilePic()));
+    DCHECK(IsImage());
+    image_writer_.reset(new ImageWriter(*driver_,
+                                        image_base,
+                                        compiler_options_->GetCompilePic(),
+                                        IsAppImage()));
   }
 
   // Let the ImageWriter write the image file. If we do not compile PIC, also fix up the oat file.
   bool CreateImageFile()
-      LOCKS_EXCLUDED(Locks::mutator_lock_) {
+      REQUIRES(!Locks::mutator_lock_) {
     CHECK(image_writer_ != nullptr);
-    if (!image_writer_->Write(image_filename_, oat_unstripped_, oat_location_)) {
+    if (!image_writer_->Write(app_image_fd_,
+                              IsBootImage() ? image_filename_ : app_image_file_name_,
+                              oat_unstripped_,
+                              oat_location_)) {
       LOG(ERROR) << "Failed to create image file " << image_filename_;
       return false;
     }
@@ -1746,8 +1664,8 @@ class Dex2Oat FINAL {
     // Destroy ImageWriter before doing FixupElf.
     image_writer_.reset();
 
-    // Do not fix up the ELF file if we are --compile-pic
-    if (!compiler_options_->GetCompilePic()) {
+    // Do not fix up the ELF file if we are --compile-pic or compiing the app image
+    if (!compiler_options_->GetCompilePic() && IsBootImage()) {
       std::unique_ptr<File> oat_file(OS::OpenFileReadWrite(oat_unstripped_.c_str()));
       if (oat_file.get() == nullptr) {
         PLOG(ERROR) << "Failed to open ELF file: " << oat_unstripped_;
@@ -1860,7 +1778,7 @@ class Dex2Oat FINAL {
     // Note: driver creation can fail when loading an invalid dex file.
     LOG(INFO) << "dex2oat took " << PrettyDuration(NanoTime() - start_ns_)
               << " (threads: " << thread_count_ << ") "
-              << ((Runtime::Current() != nullptr && driver_.get() != nullptr) ?
+              << ((Runtime::Current() != nullptr && driver_ != nullptr) ?
                   driver_->GetMemoryUsageString(kIsDebugBuild || VLOG_IS_ON(compiler)) :
                   "");
   }
@@ -1874,15 +1792,14 @@ class Dex2Oat FINAL {
   std::unique_ptr<SafeMap<std::string, std::string> > key_value_store_;
 
   std::unique_ptr<VerificationResults> verification_results_;
+
   DexFileToMethodInlinerMap method_inliner_map_;
   std::unique_ptr<QuickCompilerCallbacks> callbacks_;
 
   // Ownership for the class path files.
   std::vector<std::unique_ptr<const DexFile>> class_path_files_;
 
-  // Not a unique_ptr as we want to just exit on non-debug builds, not bringing the runtime down
-  // in an orderly fashion. The destructor takes care of deleting this.
-  Runtime* runtime_;
+  std::unique_ptr<Runtime> runtime_;
 
   size_t thread_count_;
   uint64_t start_ns_;
@@ -1910,25 +1827,31 @@ class Dex2Oat FINAL {
   std::unique_ptr<std::unordered_set<std::string>> image_classes_;
   std::unique_ptr<std::unordered_set<std::string>> compiled_classes_;
   std::unique_ptr<std::unordered_set<std::string>> compiled_methods_;
-  bool image_;
-  std::unique_ptr<ImageWriter> image_writer_;
+  bool app_image_;
+  bool boot_image_;
   bool is_host_;
   std::string android_root_;
   std::vector<const DexFile*> dex_files_;
+  std::vector<jobject> dex_caches_;
   std::vector<std::unique_ptr<const DexFile>> opened_dex_files_;
+
+  std::unique_ptr<ImageWriter> image_writer_;
   std::unique_ptr<CompilerDriver> driver_;
+
   std::vector<std::string> verbose_methods_;
   bool dump_stats_;
   bool dump_passes_;
   bool dump_timing_;
   bool dump_slow_timing_;
   std::string dump_cfg_file_name_;
+  bool dump_cfg_append_;
   std::string swap_file_name_;
   int swap_fd_;
+  std::string app_image_file_name_;
+  int app_image_fd_;
   std::string profile_file_;  // Profile file to use
   TimingLogger* timings_;
   std::unique_ptr<CumulativeLogger> compiler_phases_timings_;
-  std::unique_ptr<std::ostream> init_failure_output_;
 
   DISALLOW_IMPLICIT_CONSTRUCTORS(Dex2Oat);
 };
@@ -2054,7 +1977,7 @@ static int dex2oat(int argc, char** argv) {
   //   3) Compiling with --host
   //   4) Compiling on the host (not a target build)
   // Otherwise, print a stripped command line.
-  if (kIsDebugBuild || dex2oat.IsImage() || dex2oat.IsHost() || !kIsTargetBuild) {
+  if (kIsDebugBuild || dex2oat.IsBootImage() || dex2oat.IsHost() || !kIsTargetBuild) {
     LOG(INFO) << CommandLine();
   } else {
     LOG(INFO) << StrippedCommandLine();
@@ -2065,11 +1988,15 @@ static int dex2oat(int argc, char** argv) {
     return EXIT_FAILURE;
   }
 
+  bool result;
   if (dex2oat.IsImage()) {
-    return CompileImage(dex2oat);
+    result = CompileImage(dex2oat);
   } else {
-    return CompileApp(dex2oat);
+    result = CompileApp(dex2oat);
   }
+
+  dex2oat.Shutdown();
+  return result;
 }
 }  // namespace art
 
@@ -2078,7 +2005,7 @@ int main(int argc, char** argv) {
   // Everything was done, do an explicit exit here to avoid running Runtime destructors that take
   // time (bug 10645725) unless we're a debug build or running on valgrind. Note: The Dex2Oat class
   // should not destruct the runtime in this case.
-  if (!art::kIsDebugBuild && (RUNNING_ON_VALGRIND == 0)) {
+  if (!art::kIsDebugBuild && (RUNNING_ON_MEMORY_TOOL == 0)) {
     exit(result);
   }
   return result;

@@ -16,6 +16,7 @@
 
 #include "arch/instruction_set_features.h"
 #include "art_method-inl.h"
+#include "base/unix_file/fd_file.h"
 #include "class_linker.h"
 #include "common_compiler_test.h"
 #include "compiled_method.h"
@@ -26,6 +27,9 @@
 #include "dex/verification_results.h"
 #include "driver/compiler_driver.h"
 #include "driver/compiler_options.h"
+#include "dwarf/method_debug_info.h"
+#include "elf_writer.h"
+#include "elf_writer_quick.h"
 #include "entrypoints/quick/quick_entrypoints.h"
 #include "mirror/class-inl.h"
 #include "mirror/object_array-inl.h"
@@ -37,6 +41,16 @@
 
 namespace art {
 
+NO_RETURN static void Usage(const char* fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  std::string error;
+  StringAppendV(&error, fmt, ap);
+  LOG(FATAL) << error;
+  va_end(ap);
+  UNREACHABLE();
+}
+
 class OatTest : public CommonCompilerTest {
  protected:
   static const bool kCompile = false;  // DISABLED_ due to the time to compile libcore
@@ -44,7 +58,7 @@ class OatTest : public CommonCompilerTest {
   void CheckMethod(ArtMethod* method,
                    const OatFile::OatMethod& oat_method,
                    const DexFile& dex_file)
-      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+      SHARED_REQUIRES(Locks::mutator_lock_) {
     const CompiledMethod* compiled_method =
         compiler_driver_->GetCompiledMethod(MethodReference(&dex_file,
                                                             method->GetDexMethodIndex()));
@@ -63,14 +77,100 @@ class OatTest : public CommonCompilerTest {
       EXPECT_EQ(oat_method.GetFpSpillMask(), compiled_method->GetFpSpillMask());
       uintptr_t oat_code_aligned = RoundDown(reinterpret_cast<uintptr_t>(quick_oat_code), 2);
       quick_oat_code = reinterpret_cast<const void*>(oat_code_aligned);
-      const SwapVector<uint8_t>* quick_code = compiled_method->GetQuickCode();
-      EXPECT_TRUE(quick_code != nullptr);
-      size_t code_size = quick_code->size() * sizeof(quick_code[0]);
+      ArrayRef<const uint8_t> quick_code = compiled_method->GetQuickCode();
+      EXPECT_FALSE(quick_code.empty());
+      size_t code_size = quick_code.size() * sizeof(quick_code[0]);
       EXPECT_EQ(0, memcmp(quick_oat_code, &quick_code[0], code_size))
           << PrettyMethod(method) << " " << code_size;
       CHECK_EQ(0, memcmp(quick_oat_code, &quick_code[0], code_size));
     }
   }
+
+  void SetupCompiler(Compiler::Kind compiler_kind,
+                     InstructionSet insn_set,
+                     const std::vector<std::string>& compiler_options,
+                     /*out*/std::string* error_msg) {
+    ASSERT_TRUE(error_msg != nullptr);
+    insn_features_.reset(InstructionSetFeatures::FromVariant(insn_set, "default", error_msg));
+    ASSERT_TRUE(insn_features_ != nullptr) << error_msg;
+    compiler_options_.reset(new CompilerOptions);
+    for (const std::string& option : compiler_options) {
+      compiler_options_->ParseCompilerOption(option, Usage);
+    }
+    verification_results_.reset(new VerificationResults(compiler_options_.get()));
+    method_inliner_map_.reset(new DexFileToMethodInlinerMap);
+    callbacks_.reset(new QuickCompilerCallbacks(verification_results_.get(),
+                                                method_inliner_map_.get(),
+                                                CompilerCallbacks::CallbackMode::kCompileApp));
+    Runtime::Current()->SetCompilerCallbacks(callbacks_.get());
+    timer_.reset(new CumulativeLogger("Compilation times"));
+    compiler_driver_.reset(new CompilerDriver(compiler_options_.get(),
+                                              verification_results_.get(),
+                                              method_inliner_map_.get(),
+                                              compiler_kind,
+                                              insn_set,
+                                              insn_features_.get(),
+                                              false,
+                                              nullptr,
+                                              nullptr,
+                                              nullptr,
+                                              2,
+                                              true,
+                                              true,
+                                              "",
+                                              false,
+                                              timer_.get(),
+                                              -1,
+                                              ""));
+  }
+
+  bool WriteElf(File* file,
+                const std::vector<const DexFile*>& dex_files,
+                SafeMap<std::string, std::string>& key_value_store) {
+    TimingLogger timings("WriteElf", false, false);
+    OatWriter oat_writer(dex_files,
+                         42U,
+                         4096U,
+                         0,
+                         compiler_driver_.get(),
+                         nullptr,
+                         /*compiling_boot_image*/false,
+                         &timings,
+                         &key_value_store);
+    std::unique_ptr<ElfWriter> elf_writer = CreateElfWriterQuick(
+        compiler_driver_->GetInstructionSet(),
+        &compiler_driver_->GetCompilerOptions(),
+        file);
+
+    elf_writer->Start();
+
+    OutputStream* rodata = elf_writer->StartRoData();
+    if (!oat_writer.WriteRodata(rodata)) {
+      return false;
+    }
+    elf_writer->EndRoData(rodata);
+
+    OutputStream* text = elf_writer->StartText();
+    if (!oat_writer.WriteCode(text)) {
+      return false;
+    }
+    elf_writer->EndText(text);
+
+    elf_writer->SetBssSize(oat_writer.GetBssSize());
+
+    elf_writer->WriteDynamicSection();
+
+    ArrayRef<const dwarf::MethodDebugInfo> method_infos(oat_writer.GetMethodDebugInfo());
+    elf_writer->WriteDebugInfo(method_infos);
+
+    ArrayRef<const uintptr_t> patch_locations(oat_writer.GetAbsolutePatchLocations());
+    elf_writer->WritePatchLocations(patch_locations);
+
+    return elf_writer->End();
+  }
+
+  std::unique_ptr<const InstructionSetFeatures> insn_features_;
+  std::unique_ptr<QuickCompilerCallbacks> callbacks_;
 };
 
 TEST_F(OatTest, WriteRead) {
@@ -80,43 +180,20 @@ TEST_F(OatTest, WriteRead) {
   // TODO: make selectable.
   Compiler::Kind compiler_kind = Compiler::kQuick;
   InstructionSet insn_set = kIsTargetBuild ? kThumb2 : kX86;
-
   std::string error_msg;
-  std::unique_ptr<const InstructionSetFeatures> insn_features(
-      InstructionSetFeatures::FromVariant(insn_set, "default", &error_msg));
-  ASSERT_TRUE(insn_features.get() != nullptr) << error_msg;
-  compiler_options_.reset(new CompilerOptions);
-  verification_results_.reset(new VerificationResults(compiler_options_.get()));
-  method_inliner_map_.reset(new DexFileToMethodInlinerMap);
-  timer_.reset(new CumulativeLogger("Compilation times"));
-  compiler_driver_.reset(new CompilerDriver(compiler_options_.get(),
-                                            verification_results_.get(),
-                                            method_inliner_map_.get(),
-                                            compiler_kind, insn_set,
-                                            insn_features.get(), false, nullptr, nullptr, nullptr,
-                                            2, true, true, "", timer_.get(), -1, ""));
+  SetupCompiler(compiler_kind, insn_set, std::vector<std::string>(), /*out*/ &error_msg);
+
   jobject class_loader = nullptr;
   if (kCompile) {
     TimingLogger timings2("OatTest::WriteRead", false, false);
+    compiler_driver_->SetDexFilesForOatFile(class_linker->GetBootClassPath());
     compiler_driver_->CompileAll(class_loader, class_linker->GetBootClassPath(), &timings2);
   }
 
   ScratchFile tmp;
   SafeMap<std::string, std::string> key_value_store;
   key_value_store.Put(OatHeader::kImageLocationKey, "lue.art");
-  OatWriter oat_writer(class_linker->GetBootClassPath(),
-                       42U,
-                       4096U,
-                       0,
-                       compiler_driver_.get(),
-                       nullptr,
-                       &timings,
-                       &key_value_store);
-  bool success = compiler_driver_->WriteElf(GetTestAndroidRoot(),
-                                            !kIsTargetBuild,
-                                            class_linker->GetBootClassPath(),
-                                            &oat_writer,
-                                            tmp.GetFile());
+  bool success = WriteElf(tmp.GetFile(), class_linker->GetBootClassPath(), key_value_store);
   ASSERT_TRUE(success);
 
   if (kCompile) {  // OatWriter strips the code, regenerate to compare
@@ -183,7 +260,7 @@ TEST_F(OatTest, OatHeaderSizeCheck) {
   EXPECT_EQ(72U, sizeof(OatHeader));
   EXPECT_EQ(4U, sizeof(OatMethodOffsets));
   EXPECT_EQ(28U, sizeof(OatQuickMethodHeader));
-  EXPECT_EQ(112 * GetInstructionSetPointerSize(kRuntimeISA), sizeof(QuickEntryPoints));
+  EXPECT_EQ(114 * GetInstructionSetPointerSize(kRuntimeISA), sizeof(QuickEntryPoints));
 }
 
 TEST_F(OatTest, OatHeaderIsValid) {
@@ -209,6 +286,55 @@ TEST_F(OatTest, OatHeaderIsValid) {
     ASSERT_FALSE(oat_header->IsValid());
     strcpy(magic, "oat\n000");  // bad version
     ASSERT_FALSE(oat_header->IsValid());
+}
+
+TEST_F(OatTest, EmptyTextSection) {
+  TimingLogger timings("OatTest::EmptyTextSection", false, false);
+
+  // TODO: make selectable.
+  Compiler::Kind compiler_kind = Compiler::kQuick;
+  InstructionSet insn_set = kRuntimeISA;
+  if (insn_set == kArm) insn_set = kThumb2;
+  std::string error_msg;
+  std::vector<std::string> compiler_options;
+  compiler_options.push_back("--compiler-filter=verify-at-runtime");
+  SetupCompiler(compiler_kind, insn_set, compiler_options, /*out*/ &error_msg);
+
+  jobject class_loader;
+  {
+    ScopedObjectAccess soa(Thread::Current());
+    class_loader = LoadDex("Main");
+  }
+  ASSERT_TRUE(class_loader != nullptr);
+  std::vector<const DexFile*> dex_files = GetDexFiles(class_loader);
+  ASSERT_TRUE(!dex_files.empty());
+
+  ClassLinker* const class_linker = Runtime::Current()->GetClassLinker();
+  for (const DexFile* dex_file : dex_files) {
+    ScopedObjectAccess soa(Thread::Current());
+    class_linker->RegisterDexFile(
+        *dex_file,
+        class_linker->GetOrCreateAllocatorForClassLoader(
+            soa.Decode<mirror::ClassLoader*>(class_loader)));
+  }
+  compiler_driver_->SetDexFilesForOatFile(dex_files);
+  compiler_driver_->CompileAll(class_loader, dex_files, &timings);
+
+  ScratchFile tmp;
+  SafeMap<std::string, std::string> key_value_store;
+  key_value_store.Put(OatHeader::kImageLocationKey, "test.art");
+  bool success = WriteElf(tmp.GetFile(), dex_files, key_value_store);
+  ASSERT_TRUE(success);
+
+  std::unique_ptr<OatFile> oat_file(OatFile::Open(tmp.GetFilename(),
+                                                  tmp.GetFilename(),
+                                                  nullptr,
+                                                  nullptr,
+                                                  false,
+                                                  nullptr,
+                                                  &error_msg));
+  ASSERT_TRUE(oat_file != nullptr);
+  EXPECT_LT(static_cast<size_t>(oat_file->Size()), static_cast<size_t>(tmp.GetFile()->GetLength()));
 }
 
 }  // namespace art

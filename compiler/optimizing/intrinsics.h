@@ -30,16 +30,15 @@ class DexFile;
 // Recognize intrinsics from HInvoke nodes.
 class IntrinsicsRecognizer : public HOptimization {
  public:
-  IntrinsicsRecognizer(HGraph* graph, const DexFile* dex_file, CompilerDriver* driver)
-      : HOptimization(graph, true, kIntrinsicsRecognizerPassName),
-        dex_file_(dex_file), driver_(driver) {}
+  IntrinsicsRecognizer(HGraph* graph, CompilerDriver* driver)
+      : HOptimization(graph, kIntrinsicsRecognizerPassName),
+        driver_(driver) {}
 
   void Run() OVERRIDE;
 
   static constexpr const char* kIntrinsicsRecognizerPassName = "intrinsics_recognition";
 
  private:
-  const DexFile* dex_file_;
   CompilerDriver* driver_;
 
   DISALLOW_COPY_AND_ASSIGN(IntrinsicsRecognizer);
@@ -55,7 +54,7 @@ class IntrinsicVisitor : public ValueObject {
     switch (invoke->GetIntrinsic()) {
       case Intrinsics::kNone:
         return;
-#define OPTIMIZING_INTRINSICS(Name, IsStatic) \
+#define OPTIMIZING_INTRINSICS(Name, IsStatic, NeedsEnvironment) \
       case Intrinsics::k ## Name:             \
         Visit ## Name(invoke);                \
         return;
@@ -70,7 +69,7 @@ INTRINSICS_LIST(OPTIMIZING_INTRINSICS)
 
   // Define visitor methods.
 
-#define OPTIMIZING_INTRINSICS(Name, IsStatic)                    \
+#define OPTIMIZING_INTRINSICS(Name, IsStatic, NeedsEnvironment)                    \
   virtual void Visit ## Name(HInvoke* invoke ATTRIBUTE_UNUSED) { \
   }
 #include "intrinsics_list.h"
@@ -116,6 +115,80 @@ INTRINSICS_LIST(OPTIMIZING_INTRINSICS)
  private:
   DISALLOW_COPY_AND_ASSIGN(IntrinsicVisitor);
 };
+
+#define GENERIC_OPTIMIZATION(name, bit)                \
+public:                                                \
+void Set##name() { SetBit(k##name); }                  \
+bool Get##name() const { return IsBitSet(k##name); }   \
+private:                                               \
+static constexpr int k##name = bit
+
+class IntrinsicOptimizations : public ValueObject {
+ public:
+  explicit IntrinsicOptimizations(HInvoke* invoke) : value_(invoke->GetIntrinsicOptimizations()) {}
+  explicit IntrinsicOptimizations(const HInvoke& invoke)
+      : value_(invoke.GetIntrinsicOptimizations()) {}
+
+  static constexpr int kNumberOfGenericOptimizations = 2;
+  GENERIC_OPTIMIZATION(DoesNotNeedDexCache, 0);
+  GENERIC_OPTIMIZATION(DoesNotNeedEnvironment, 1);
+
+ protected:
+  bool IsBitSet(uint32_t bit) const {
+    return (*value_ & (1 << bit)) != 0u;
+  }
+
+  void SetBit(uint32_t bit) {
+    *(const_cast<uint32_t*>(value_)) |= (1 << bit);
+  }
+
+ private:
+  const uint32_t *value_;
+
+  DISALLOW_COPY_AND_ASSIGN(IntrinsicOptimizations);
+};
+
+#undef GENERIC_OPTIMIZATION
+
+#define INTRINSIC_OPTIMIZATION(name, bit)                             \
+public:                                                               \
+void Set##name() { SetBit(k##name); }                                 \
+bool Get##name() const { return IsBitSet(k##name); }                  \
+private:                                                              \
+static constexpr int k##name = bit + kNumberOfGenericOptimizations
+
+class StringEqualsOptimizations : public IntrinsicOptimizations {
+ public:
+  explicit StringEqualsOptimizations(HInvoke* invoke) : IntrinsicOptimizations(invoke) {}
+
+  INTRINSIC_OPTIMIZATION(ArgumentNotNull, 0);
+  INTRINSIC_OPTIMIZATION(ArgumentIsString, 1);
+
+ private:
+  DISALLOW_COPY_AND_ASSIGN(StringEqualsOptimizations);
+};
+
+class SystemArrayCopyOptimizations : public IntrinsicOptimizations {
+ public:
+  explicit SystemArrayCopyOptimizations(HInvoke* invoke) : IntrinsicOptimizations(invoke) {}
+
+  INTRINSIC_OPTIMIZATION(SourceIsNotNull, 0);
+  INTRINSIC_OPTIMIZATION(DestinationIsNotNull, 1);
+  INTRINSIC_OPTIMIZATION(DestinationIsSource, 2);
+  INTRINSIC_OPTIMIZATION(CountIsSourceLength, 3);
+  INTRINSIC_OPTIMIZATION(CountIsDestinationLength, 4);
+  INTRINSIC_OPTIMIZATION(DoesNotNeedTypeCheck, 5);
+  INTRINSIC_OPTIMIZATION(DestinationIsTypedObjectArray, 6);
+  INTRINSIC_OPTIMIZATION(DestinationIsNonPrimitiveArray, 7);
+  INTRINSIC_OPTIMIZATION(DestinationIsPrimitiveArray, 8);
+  INTRINSIC_OPTIMIZATION(SourceIsNonPrimitiveArray, 9);
+  INTRINSIC_OPTIMIZATION(SourceIsPrimitiveArray, 10);
+
+ private:
+  DISALLOW_COPY_AND_ASSIGN(SystemArrayCopyOptimizations);
+};
+
+#undef INTRISIC_OPTIMIZATION
 
 }  // namespace art
 

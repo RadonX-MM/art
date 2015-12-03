@@ -21,6 +21,7 @@
 #include <stddef.h>
 
 #include "base/bit_utils.h"
+#include "base/memory_tool.h"
 #include "debug_stack.h"
 #include "macros.h"
 #include "mutex.h"
@@ -43,7 +44,6 @@ static constexpr bool kArenaAllocatorCountAllocations = false;
 // Type of allocation for memory tuning.
 enum ArenaAllocKind {
   kArenaAllocMisc,
-  kArenaAllocBB,
   kArenaAllocBBList,
   kArenaAllocBBPredecessors,
   kArenaAllocDfsPreOrder,
@@ -63,11 +63,51 @@ enum ArenaAllocKind {
   kArenaAllocSSAToDalvikMap,
   kArenaAllocDalvikToSSAMap,
   kArenaAllocDebugInfo,
-  kArenaAllocSuccessor,
   kArenaAllocRegAlloc,
   kArenaAllocData,
-  kArenaAllocPredecessors,
   kArenaAllocSTL,
+  kArenaAllocGraphBuilder,
+  kArenaAllocGraph,
+  kArenaAllocBasicBlock,
+  kArenaAllocBlockList,
+  kArenaAllocReversePostOrder,
+  kArenaAllocLinearOrder,
+  kArenaAllocConstantsMap,
+  kArenaAllocPredecessors,
+  kArenaAllocSuccessors,
+  kArenaAllocDominated,
+  kArenaAllocInstruction,
+  kArenaAllocInvokeInputs,
+  kArenaAllocPhiInputs,
+  kArenaAllocLoopInfo,
+  kArenaAllocLoopInfoBackEdges,
+  kArenaAllocTryCatchInfo,
+  kArenaAllocUseListNode,
+  kArenaAllocEnvironment,
+  kArenaAllocEnvironmentVRegs,
+  kArenaAllocEnvironmentLocations,
+  kArenaAllocLocationSummary,
+  kArenaAllocSsaBuilder,
+  kArenaAllocMoveOperands,
+  kArenaAllocCodeBuffer,
+  kArenaAllocStackMaps,
+  kArenaAllocBaselineMaps,
+  kArenaAllocOptimization,
+  kArenaAllocGvn,
+  kArenaAllocInductionVarAnalysis,
+  kArenaAllocBoundsCheckElimination,
+  kArenaAllocSsaLiveness,
+  kArenaAllocSsaPhiElimination,
+  kArenaAllocReferenceTypePropagation,
+  kArenaAllocPrimitiveTypePropagation,
+  kArenaAllocSideEffectsAnalysis,
+  kArenaAllocRegisterAllocator,
+  kArenaAllocStackMapStream,
+  kArenaAllocCodeGenerator,
+  kArenaAllocParallelMoveResolver,
+  kArenaAllocGraphChecker,
+  kArenaAllocLSE,
+  kArenaAllocVerifier,
   kNumArenaAllocKinds
 };
 
@@ -81,13 +121,13 @@ class ArenaAllocatorStatsImpl<false> {
   ArenaAllocatorStatsImpl(const ArenaAllocatorStatsImpl& other) = default;
   ArenaAllocatorStatsImpl& operator = (const ArenaAllocatorStatsImpl& other) = delete;
 
-  void Copy(const ArenaAllocatorStatsImpl& other) { UNUSED(other); }
-  void RecordAlloc(size_t bytes, ArenaAllocKind kind) { UNUSED(bytes, kind); }
+  void Copy(const ArenaAllocatorStatsImpl& other ATTRIBUTE_UNUSED) {}
+  void RecordAlloc(size_t bytes ATTRIBUTE_UNUSED, ArenaAllocKind kind ATTRIBUTE_UNUSED) {}
   size_t NumAllocations() const { return 0u; }
   size_t BytesAllocated() const { return 0u; }
-  void Dump(std::ostream& os, const Arena* first, ssize_t lost_bytes_adjustment) const {
-    UNUSED(os); UNUSED(first); UNUSED(lost_bytes_adjustment);
-  }
+  void Dump(std::ostream& os ATTRIBUTE_UNUSED,
+            const Arena* first ATTRIBUTE_UNUSED,
+            ssize_t lost_bytes_adjustment ATTRIBUTE_UNUSED) const {}
 };
 
 template <bool kCount>
@@ -112,6 +152,57 @@ class ArenaAllocatorStatsImpl {
 };
 
 typedef ArenaAllocatorStatsImpl<kArenaAllocatorCountAllocations> ArenaAllocatorStats;
+
+template <bool kAvailable, bool kValgrind>
+class ArenaAllocatorMemoryToolCheckImpl {
+  // This is the generic template but since there is a partial specialization
+  // for kValgrind == false, this can be instantiated only for kValgrind == true.
+  static_assert(kValgrind, "This template can be instantiated only for Valgrind.");
+  static_assert(kAvailable, "Valgrind implies memory tool availability.");
+
+ public:
+  ArenaAllocatorMemoryToolCheckImpl() : is_running_on_valgrind_(RUNNING_ON_MEMORY_TOOL) { }
+  bool IsRunningOnMemoryTool() { return is_running_on_valgrind_; }
+
+ private:
+  const bool is_running_on_valgrind_;
+};
+
+template <bool kAvailable>
+class ArenaAllocatorMemoryToolCheckImpl<kAvailable, false> {
+ public:
+  ArenaAllocatorMemoryToolCheckImpl() { }
+  bool IsRunningOnMemoryTool() { return kAvailable; }
+};
+
+typedef ArenaAllocatorMemoryToolCheckImpl<kMemoryToolIsAvailable, kMemoryToolIsValgrind>
+    ArenaAllocatorMemoryToolCheck;
+
+class ArenaAllocatorMemoryTool : private ArenaAllocatorMemoryToolCheck {
+ public:
+  using ArenaAllocatorMemoryToolCheck::IsRunningOnMemoryTool;
+
+  void MakeDefined(void* ptr, size_t size) {
+    if (UNLIKELY(IsRunningOnMemoryTool())) {
+      DoMakeDefined(ptr, size);
+    }
+  }
+  void MakeUndefined(void* ptr, size_t size) {
+    if (UNLIKELY(IsRunningOnMemoryTool())) {
+      DoMakeUndefined(ptr, size);
+    }
+  }
+  void MakeInaccessible(void* ptr, size_t size) {
+    if (UNLIKELY(IsRunningOnMemoryTool())) {
+      DoMakeInaccessible(ptr, size);
+    }
+  }
+
+ private:
+  void DoMakeDefined(void* ptr, size_t size);
+  void DoMakeUndefined(void* ptr, size_t size);
+  void DoMakeInaccessible(void* ptr, size_t size);
+};
 
 class Arena {
  public:
@@ -170,7 +261,7 @@ class MallocArena FINAL : public Arena {
 
 class MemMapArena FINAL : public Arena {
  public:
-  explicit MemMapArena(size_t size, bool low_4gb);
+  MemMapArena(size_t size, bool low_4gb);
   virtual ~MemMapArena();
   void Release() OVERRIDE;
 
@@ -182,12 +273,12 @@ class ArenaPool {
  public:
   explicit ArenaPool(bool use_malloc = true, bool low_4gb = false);
   ~ArenaPool();
-  Arena* AllocArena(size_t size) LOCKS_EXCLUDED(lock_);
-  void FreeArenaChain(Arena* first) LOCKS_EXCLUDED(lock_);
-  size_t GetBytesAllocated() const LOCKS_EXCLUDED(lock_);
+  Arena* AllocArena(size_t size) REQUIRES(!lock_);
+  void FreeArenaChain(Arena* first) REQUIRES(!lock_);
+  size_t GetBytesAllocated() const REQUIRES(!lock_);
   // Trim the maps in arenas by madvising, used by JIT to reduce memory usage. This only works
   // use_malloc is false.
-  void TrimMaps() LOCKS_EXCLUDED(lock_);
+  void TrimMaps() REQUIRES(!lock_);
 
  private:
   const bool use_malloc_;
@@ -197,18 +288,29 @@ class ArenaPool {
   DISALLOW_COPY_AND_ASSIGN(ArenaPool);
 };
 
-class ArenaAllocator : private DebugStackRefCounter, private ArenaAllocatorStats {
+// Fast single-threaded allocator for zero-initialized memory chunks.
+//
+// Memory is allocated from ArenaPool in large chunks and then rationed through
+// the ArenaAllocator. It's returned to the ArenaPool only when the ArenaAllocator
+// is destroyed.
+class ArenaAllocator
+    : private DebugStackRefCounter, private ArenaAllocatorStats, private ArenaAllocatorMemoryTool {
  public:
   explicit ArenaAllocator(ArenaPool* pool);
   ~ArenaAllocator();
+
+  using ArenaAllocatorMemoryTool::IsRunningOnMemoryTool;
+  using ArenaAllocatorMemoryTool::MakeDefined;
+  using ArenaAllocatorMemoryTool::MakeUndefined;
+  using ArenaAllocatorMemoryTool::MakeInaccessible;
 
   // Get adapter for use in STL containers. See arena_containers.h .
   ArenaAllocatorAdapter<void> Adapter(ArenaAllocKind kind = kArenaAllocSTL);
 
   // Returns zeroed memory.
   void* Alloc(size_t bytes, ArenaAllocKind kind = kArenaAllocMisc) ALWAYS_INLINE {
-    if (UNLIKELY(running_on_valgrind_)) {
-      return AllocValgrind(bytes, kind);
+    if (UNLIKELY(IsRunningOnMemoryTool())) {
+      return AllocWithMemoryTool(bytes, kind);
     }
     bytes = RoundUp(bytes, kAlignment);
     if (UNLIKELY(ptr_ + bytes > end_)) {
@@ -232,6 +334,7 @@ class ArenaAllocator : private DebugStackRefCounter, private ArenaAllocatorStats
     auto* end = reinterpret_cast<uint8_t*>(ptr) + ptr_size;
     // If we haven't allocated anything else, we can safely extend.
     if (end == ptr_) {
+      DCHECK(!IsRunningOnMemoryTool());  // Red zone prevents end == ptr_.
       const size_t size_delta = new_size - ptr_size;
       // Check remain space.
       const size_t remain = end_ - ptr_;
@@ -252,7 +355,7 @@ class ArenaAllocator : private DebugStackRefCounter, private ArenaAllocatorStats
     return static_cast<T*>(Alloc(length * sizeof(T), kind));
   }
 
-  void* AllocValgrind(size_t bytes, ArenaAllocKind kind);
+  void* AllocWithMemoryTool(size_t bytes, ArenaAllocKind kind);
 
   void ObtainNewArenaForAllocation(size_t allocation_size);
 
@@ -280,7 +383,6 @@ class ArenaAllocator : private DebugStackRefCounter, private ArenaAllocatorStats
   uint8_t* end_;
   uint8_t* ptr_;
   Arena* arena_head_;
-  bool running_on_valgrind_;
 
   template <typename U>
   friend class ArenaAllocatorAdapter;

@@ -45,7 +45,7 @@ static void TestCode(const uint16_t* data,
       X86InstructionSetFeatures::FromCppDefines());
   x86::CodeGeneratorX86 codegenX86(graph, *features_x86.get(), CompilerOptions());
   HDeadCodeElimination(graph).Run();
-  SSAChecker ssa_checker(&allocator, graph);
+  SSAChecker ssa_checker(graph);
   ssa_checker.Run();
   ASSERT_TRUE(ssa_checker.IsValid());
 
@@ -140,7 +140,7 @@ TEST(DeadCodeElimination, AdditionsAndInconditionalJumps) {
     Instruction::ADD_INT_LIT16 | 1 << 8 | 0 << 12, 3,
     Instruction::GOTO | 4 << 8,
     Instruction::ADD_INT_LIT16 | 0 << 8 | 2 << 12, 2,
-    static_cast<uint16_t>(Instruction::GOTO | -5 << 8),
+    static_cast<uint16_t>(Instruction::GOTO | 0xFFFFFFFB << 8),
     Instruction::ADD_INT_LIT16 | 2 << 8 | 1 << 12, 4,
     Instruction::RETURN_VOID);
 

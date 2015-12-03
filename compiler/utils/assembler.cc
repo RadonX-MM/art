@@ -19,13 +19,26 @@
 #include <algorithm>
 #include <vector>
 
+#ifdef ART_ENABLE_CODEGEN_arm
 #include "arm/assembler_arm32.h"
 #include "arm/assembler_thumb2.h"
+#endif
+#ifdef ART_ENABLE_CODEGEN_arm64
 #include "arm64/assembler_arm64.h"
+#endif
+#ifdef ART_ENABLE_CODEGEN_mips
 #include "mips/assembler_mips.h"
+#endif
+#ifdef ART_ENABLE_CODEGEN_mips64
 #include "mips64/assembler_mips64.h"
+#endif
+#ifdef ART_ENABLE_CODEGEN_x86
 #include "x86/assembler_x86.h"
+#endif
+#ifdef ART_ENABLE_CODEGEN_x86_64
 #include "x86_64/assembler_x86_64.h"
+#endif
+#include "base/casts.h"
 #include "globals.h"
 #include "memory_region.h"
 
@@ -80,10 +93,11 @@ void AssemblerBuffer::FinalizeInstructions(const MemoryRegion& instructions) {
 }
 
 
-void AssemblerBuffer::ExtendCapacity() {
+void AssemblerBuffer::ExtendCapacity(size_t min_capacity) {
   size_t old_size = Size();
   size_t old_capacity = Capacity();
   size_t new_capacity = std::min(old_capacity * 2, old_capacity + 1 * MB);
+  new_capacity = std::max(new_capacity, min_capacity);
 
   // Allocate the new data area and copy contents of the old one to it.
   uint8_t* new_contents = NewContents(new_capacity);
@@ -106,25 +120,46 @@ void AssemblerBuffer::ExtendCapacity() {
 }
 
 void DebugFrameOpCodeWriterForAssembler::ImplicitlyAdvancePC() {
-  this->AdvancePC(assembler_->CodeSize());
+  uint32_t pc = dchecked_integral_cast<uint32_t>(assembler_->CodeSize());
+  if (delay_emitting_advance_pc_) {
+    uint32_t stream_pos = dchecked_integral_cast<uint32_t>(opcodes_.size());
+    delayed_advance_pcs_.push_back(DelayedAdvancePC {stream_pos, pc});
+  } else {
+    AdvancePC(pc);
+  }
 }
 
-Assembler* Assembler::Create(InstructionSet instruction_set) {
+Assembler* Assembler::Create(InstructionSet instruction_set,
+                             const InstructionSetFeatures* instruction_set_features) {
   switch (instruction_set) {
+#ifdef ART_ENABLE_CODEGEN_arm
     case kArm:
       return new arm::Arm32Assembler();
     case kThumb2:
       return new arm::Thumb2Assembler();
+#endif
+#ifdef ART_ENABLE_CODEGEN_arm64
     case kArm64:
       return new arm64::Arm64Assembler();
+#endif
+#ifdef ART_ENABLE_CODEGEN_mips
     case kMips:
-      return new mips::MipsAssembler();
+      return new mips::MipsAssembler(instruction_set_features != nullptr
+                                         ? instruction_set_features->AsMipsInstructionSetFeatures()
+                                         : nullptr);
+#endif
+#ifdef ART_ENABLE_CODEGEN_mips64
     case kMips64:
       return new mips64::Mips64Assembler();
+#endif
+#ifdef ART_ENABLE_CODEGEN_x86
     case kX86:
       return new x86::X86Assembler();
+#endif
+#ifdef ART_ENABLE_CODEGEN_x86_64
     case kX86_64:
       return new x86_64::X86_64Assembler();
+#endif
     default:
       LOG(FATAL) << "Unknown InstructionSet: " << instruction_set;
       return nullptr;
