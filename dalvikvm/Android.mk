@@ -50,7 +50,6 @@ endif
 include $(CLEAR_VARS)
 LOCAL_MODULE := dalvikvm
 LOCAL_MODULE_TAGS := optional
-LOCAL_CLANG := 
 LOCAL_CPP_EXTENSION := cc
 LOCAL_SRC_FILES := dalvikvm.cc
 LOCAL_CFLAGS := $(dalvikvm_cflags)
