@@ -83,9 +83,9 @@ endef
 # GCC-only warnings.
 art_gcc_cflags := -Wunused-but-set-parameter
 
-# Unset local variables now their use has ended.
-unset art_clang_cflags
-unset art_gcc_cflags
+# Undefine local variables now their use has ended.
+undefine art_clang_cflags
+undefine art_gcc_cflags
 
 ART_CPP_EXTENSION := .cc
 
@@ -164,13 +164,13 @@ ifeq ($(HOST_OS),linux)
 endif
 
 ifndef LIBART_IMG_HOST_BASE_ADDRESS
-  $(error LIBART_IMG_HOST_BASE_ADDRESS unset)
+  $(error LIBART_IMG_HOST_BASE_ADDRESS undefine)
 endif
 ART_HOST_CFLAGS += $(art_cflags) -DART_BASE_ADDRESS=$(LIBART_IMG_HOST_BASE_ADDRESS)
 ART_HOST_CFLAGS += -DART_DEFAULT_INSTRUCTION_SET_FEATURES=default
 
 ifndef LIBART_IMG_TARGET_BASE_ADDRESS
-  $(error LIBART_IMG_TARGET_BASE_ADDRESS unset)
+  $(error LIBART_IMG_TARGET_BASE_ADDRESS undefine)
 endif
 ART_TARGET_CFLAGS += $(art_cflags) -DART_TARGET -DART_BASE_ADDRESS=$(LIBART_IMG_TARGET_BASE_ADDRESS)
 
@@ -200,14 +200,14 @@ ART_TARGET_CFLAGS += -DART_BASE_ADDRESS_MAX_DELTA=$(LIBART_IMG_TARGET_MAX_BASE_A
 # To use oprofile_android --callgraph, uncomment this and recompile with "mmm art -B -j16"
 # ART_TARGET_CFLAGS += -fno-omit-frame-pointer -marm -mapcs
 
-# Unset locals now they've served their purpose.
-unset art_cflags
-unset art_debug_cflags
-unset art_non_debug_cflags
-unset art_host_non_debug_cflags
-unset art_target_non_debug_cflags
-unset art_default_gc_type
-unset art_default_gc_type_cflags
+# Undefine locals now they've served their purpose.
+undefine art_cflags
+undefine art_debug_cflags
+undefine art_non_debug_cflags
+undefine art_host_non_debug_cflags
+undefine art_target_non_debug_cflags
+undefine art_default_gc_type
+undefine art_default_gc_type_cflags
 
 # GCC lacks libc++ assumed atomic operations, grab via libatomic.
 ART_HOST_LDLIBS += -latomic
@@ -225,8 +225,8 @@ define set-target-local-cflags-vars
     LOCAL_CFLAGS += $(ART_TARGET_NON_DEBUG_CFLAGS)
   endif
 
-  # Unset locally used variables.
-  unset art_target_cflags_ndebug_or_debug
+  # Undefine locally used variables.
+  undefine art_target_cflags_ndebug_or_debug
 endef
 
 # Build host and target as non-debug.
